@@ -22,6 +22,7 @@ class WorkerContext:
             device_id=self.device
         )
 
+        # This is for model persistency test, just delete this to load the actual model
         self.tensors = [torch.rand(256, 256) for _ in range(1000)]
 
     def get_memory_usage(self):
