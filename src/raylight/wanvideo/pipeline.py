@@ -4,6 +4,7 @@ from abc import ABC, abstractmethod
 from contextlib import contextmanager
 from functools import partial
 from typing import Any, Dict, List, Literal, Optional, Union, cast
+import types
 
 import numpy as np
 import ray
@@ -26,8 +27,10 @@ from torch.distributed.fsdp.wrap import (
     transformer_auto_wrap_policy,
 )
 from transformers import T5Tokenizer
-from .wanvideo.modules.t5 import T5EncoderModel, T5SelfAttention
-from .wanvideo.modules.clip import CLIPModel
+from model.wanvideo.modules.t5 import T5EncoderModel, T5SelfAttention
+from model.wanvideo.modules.clip import CLIPModel
+from model.globals import get_t5_model, get_max_t5_token_length, is_use_fsdp
+from model.globals import set_t5_model, set_max_t5_token_length, set_use_fsdp, set_use_xdit, set_usp_config
 from xfuser.core.distributed.parallel_state import (
     get_classifier_free_guidance_world_size,
     get_classifier_free_guidance_rank,
@@ -210,8 +213,6 @@ class WanDiTFactory(ModelFactory):
             quantization = "gguf"
             gguf = True
 
-        base_dtype = {"fp8_e4m3fn": torch.float8_e4m3fn, "fp8_e4m3fn_fast": torch.float8_e4m3fn, "bf16": torch.bfloat16, "fp16": torch.float16, "fp16_fast": torch.float16, "fp32": torch.float32}[base_precision]
-
         if not gguf:
             sd = load_torch_file(self.model_path, device=device_id, safe_load=True)
         else:
@@ -289,6 +290,21 @@ class WanDiTFactory(ModelFactory):
             in_dim_ref_conv=sd["ref_conv.weight"].shape[1] if "ref_conv.weight" in sd else None,
             add_control_adapter=True if "control_adapter.conv.weight" in sd else False,
         )
+
+        if self.kwargs["usp"]:
+            from xfuser.core.distributed import get_sequence_parallel_world_size
+
+            from .distributed.xdit_context_parallel import (
+                usp_attn_forward,
+                usp_dit_forward,
+            )
+
+            for block in model.model.blocks:
+                block.self_attn.forward = types.MethodType(
+                    usp_attn_forward, block.self_attn)
+            model.model.forward = types.MethodType(usp_dit_forward, self.model)
+            sp_size = get_sequence_parallel_world_size()
+
 
         if local_rank == 0 or not is_use_fsdp():
             # FSDP syncs weights from rank 0 to all other ranks
