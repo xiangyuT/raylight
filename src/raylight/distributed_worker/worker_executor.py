@@ -2,41 +2,115 @@
 # Read ray docs for further documentation.
 # Manually control torch.distribute using torch.mp.spawn is pain, so ray is the solution
 # Based on vLLM and XDit (XFuser) implementation
-import ray
-from .worker import WorkerContext
+import os
+import torch
+import torch.distributed as dist
 
 
-class SimpleWorkerPipeline:
-    def __init__(self, *, world_size, ulysses_degree):
-        ray.init(ignore_reinit_error=True)
-        RemoteClass = ray.remote(WorkerContext)
-        self.ctxs = [
-            RemoteClass.options(num_cpus=1).remote(
-                device_id=0,
-                local_rank=i,
+class MultiGPUContext:
+    def __init__(
+        self,
+        *,
+        text_encoder_factory,
+        dit_factory,
+        decoder_factory,
+        device_id,
+        local_rank,
+        world_size,
+        decode_type,
+        decode_args,
+        use_fsdp,
+        use_xdit,
+        ulysses_degree,
+        ring_degree,
+        cfg_parallel,
+    ):
+        # THIS IS IMPORTANT I KNOW GLOBAL IS A NO NO, BUT BOY
+        # TORCH DIST WILL COMPLAIN
+        # Internally python pickle an object to be distributed,
+        # and it must see certain conf or var to work properly hence global it.
+        set_global_config()
+        t = Timer()
+        self.device = torch.device(f"cuda:{device_id}")
+        print(f"Initializing rank {local_rank+1}/{world_size}")
+        assert world_size > 1, f"Multi-GPU mode requires world_size > 1, got {world_size}"
+        os.environ["MASTER_ADDR"] = "127.0.0.1"
+        os.environ["MASTER_PORT"] = "29500"
+        with t("init_process_group"):
+            dist.init_process_group(
+                "nccl",
+                rank=local_rank,
                 world_size=world_size,
-                ulysses_degree=ulysses_degree
+                device_id=self.device,
             )
-            for i in range(world_size)
-        ]
+        pg = dist.group.WORLD
+        cp = cp_ctx[cfg["model_name"]]
+        cp.set_cp_group(pg, list(range(world_size)), local_rank)
+        distributed_kwargs = dict(local_rank=local_rank, device_id=device_id, world_size=world_size)
+        self.world_size = world_size
+        self.local_rank = local_rank
+        self.decode_type = decode_type
+        self.decode_args = decode_args or {}
 
-        for ctx in self.ctxs:
-            ray.get(ctx.__ray_ready__.remote())
+        if is_use_xdit():
+            cp_rank, cp_size = cp.get_cp_rank_size()
+            from xfuser.core.distributed import (
+                init_distributed_environment,
+                initialize_model_parallel,
+            )
 
-    def __call__(self, **kwargs):
+            ulysses_degree, ring_degree, cfg_parallel = get_usp_config()
+            init_distributed_environment(rank=cp_rank, world_size=cp_size)
+            if not cfg_parallel:
+                if ulysses_degree is None and ring_degree is None:
+                    print(f"No usp config, use default config: ulysses_degree={cp_size}, ring_degree=1, CFG parallel false")
+                    initialize_model_parallel(
+                        sequence_parallel_degree=world_size,
+                        ring_degree=1,
+                        ulysses_degree=cp_size,
+                    )
+                else:
+                    if ulysses_degree is None:
+                        ulysses_degree = world_size // ring_degree
+                    if ring_degree is None:
+                        ring_degree = world_size // ulysses_degree
+                    print(f"Use usp config: ulysses_degree={ulysses_degree}, ring_degree={ring_degree}, CFG parallel false")
+                    initialize_model_parallel(
+                        sequence_parallel_degree=world_size,
+                        ring_degree=ring_degree,
+                        ulysses_degree=ulysses_degree,
+                    )
+            else:
+                if ulysses_degree is None and ring_degree is None:
+                    print(f"No usp config, use default config: ulysses_degree={cp_size // 2}, ring_degree=1, CFG parallel true")
+                    initialize_model_parallel(
+                        sequence_parallel_degree=world_size // 2,
+                        ring_degree=1,
+                        ulysses_degree=cp_size // 2,
+                        classifier_free_guidance_degree=2,
+                    )
+                else:
+                    if ulysses_degree is None:
+                        ulysses_degree = world_size // 2 // ring_degree
+                    if ring_degree is None:
+                        ring_degree = world_size // 2 // ulysses_degree
+                    print(f"Use usp config: ulysses_degree={ulysses_degree}, ring_degree={ring_degree}, CFG parallel true")
+                    initialize_model_parallel(
+                        sequence_parallel_degree=world_size // 2,
+                        ring_degree=ring_degree,
+                        ulysses_degree=ulysses_degree,
+                        classifier_free_guidance_degree=2,
+                    )
 
-        def sample(ctx, *, just_say, **kwargs):
-            a = ctx.device
-            print(f"{just_say} from {a}")
-            return f"success+{just_say}"
+        self.tokenizer = model_tokenizer["cfg"]
+        with t("load_text_encoder"):
+            self.text_encoder = text_encoder_factory.get_model(**distributed_kwargs)
+        with t("load_dit"):
+            self.dit = dit_factory.get_model(**distributed_kwargs)
+        with t("load_vae"):
+            self.decoder = decoder_factory.get_model(**distributed_kwargs)
 
-        return ray.get([ctx.run.remote(fn=sample, **kwargs) for i, ctx in enumerate(self.ctxs)])[0]
+        t.print_stats()
 
-
-world_size = 2
-ulysses_degree = 2
-pipeline = SimpleWorkerPipeline(world_size=world_size, ulysses_degree=ulysses_degree)
-
-kwargs = dict(just_say="Hello my name is buddy")
-result = pipeline(**kwargs)
-print(f"This is from global{result}")
+    def run(self, *, fn, **kwargs):
+        return fn(self, **kwargs)
