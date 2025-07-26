@@ -27,27 +27,13 @@ from torch.distributed.fsdp.wrap import (
 )
 from transformers import T5Tokenizer
 from .wanvideo.modules.t5 import T5EncoderModel, T5SelfAttention
-
-import genmo.mochi_preview.dit.joint_model.context_parallel as cp
-from genmo.lib.progress import get_new_progress_bar, progress_bar
-from genmo.lib.utils import Timer
-from genmo.mochi_preview.vae.models import (
-    Decoder,
-    decode_latents,
-    decode_latents_tiled_full,
-    decode_latents_tiled_spatial,
-)
-from genmo.mochi_preview.vae.vae_stats import dit_latents_to_vae_latents
-from genmo.mochi_preview.dit.joint_model import is_use_xdit
-from genmo.mochi_preview.dit.joint_model import get_usp_config
-from genmo.mochi_preview.dit.joint_model.globals import get_t5_model, get_max_t5_token_length, is_use_fsdp
-from genmo.mochi_preview.dit.joint_model.globals import set_t5_model, set_max_t5_token_length, set_use_fsdp, set_use_xdit, set_usp_config
-
+from .wanvideo.modules.clip import CLIPModel
 from xfuser.core.distributed.parallel_state import (
     get_classifier_free_guidance_world_size,
     get_classifier_free_guidance_rank,
     get_cfg_group
 )
+import folder_paths
 
 
 from comfy.utils import load_torch_file
@@ -199,43 +185,109 @@ class WanT5EncoderFactory(ModelFactory):
         return model.eval()
 
 
-class WanTransfomerFactory(ModelFactory):
+class WanDiTFactory(ModelFactory):
     def __init__(self, *, dtype, model_path: str, model_dtype: str, attention_mode: Optional[str] = None):
-        if attention_mode is None:
-            from genmo.lib.attn_imports import flash_varlen_qkvpacked_attn  # type: ignore
+        attention_mode = self.kwargs.get("attention_mode", "sdpa")
 
-            attention_mode = "sdpa" if flash_varlen_qkvpacked_attn is None else "flash"
-        print(f"Attention mode: {attention_mode}")
+        if "sage" == attention_mode:
+            try:
+                from sageattention import sageattn
+            except Exception as e:
+                raise ValueError(f"Can't import SageAttention: {str(e)}")
+
         super().__init__(
             dtype=dtype, model_path=model_path, model_dtype=model_dtype, attention_mode=attention_mode
         )
+        self.model_path = model_path
 
     def get_model(self, *, local_rank, device_id, world_size):
-        # TODO(ved): Set flag for torch.compile
-        from genmo.mochi_preview.dit.joint_model.asymm_models_joint import (
-            AsymmDiTJoint,
-        )
+        from .wanvideo.modules.model import WanModel
+
+        gguf = False
+        if self.model_path.endswith(".gguf"):
+            if self.kwargs["quantization"] != "disabled":
+                raise ValueError("Quantization should be disabled when loading GGUF models.")
+            quantization = "gguf"
+            gguf = True
+
+        base_dtype = {"fp8_e4m3fn": torch.float8_e4m3fn, "fp8_e4m3fn_fast": torch.float8_e4m3fn, "bf16": torch.bfloat16, "fp16": torch.float16, "fp16_fast": torch.float16, "fp32": torch.float32}[base_precision]
+
+        if not gguf:
+            sd = load_torch_file(self.model_path, device=device_id, safe_load=True)
+        else:
+            from diffusers.models.model_loading_utils import load_gguf_checkpoint
+            sd = load_gguf_checkpoint(self.model_path)
+
+        if quantization == "disabled":
+            if "scaled_fp8" in sd:
+                quantization = "fp8_e4m3fn_scaled"
+            else:
+                for k, v in sd.items():
+                    if isinstance(v, torch.Tensor):
+                        if v.dtype == torch.float8_e4m3fn:
+                            quantization = "fp8_e4m3fn"
+                            break
+                        elif v.dtype == torch.float8_e5m2:
+                            quantization = "fp8_e5m2"
+                            break
+
+        if "scaled_fp8" in sd and quantization != "fp8_e4m3fn_scaled":
+            raise ValueError("The model is a scaled fp8 model, please set quantization to 'fp8_e4m3fn_scaled'")
+
+        first_key = next(iter(sd))
+        if first_key.startswith("model.diffusion_model."):
+            new_sd = {}
+            for key, value in sd.items():
+                new_key = key.replace("model.diffusion_model.", "", 1)
+                new_sd[new_key] = value
+            sd = new_sd
+        elif first_key.startswith("model."):
+            new_sd = {}
+            for key, value in sd.items():
+                new_key = key.replace("model.", "", 1)
+                new_sd[new_key] = value
+            sd = new_sd
+
+        if "patch_embedding.weight" not in sd:
+            raise ValueError("Invalid WanVideo model selected")
+        dim = sd["patch_embedding.weight"].shape[0]
+        in_features = sd["blocks.0.self_attn.k.weight"].shape[1]
+        out_features = sd["blocks.0.self_attn.k.weight"].shape[0]
+        in_channels = sd["patch_embedding.weight"].shape[1]
+        ffn_dim = sd["blocks.0.ffn.0.bias"].shape[0]
+        ffn2_dim = sd["blocks.0.ffn.2.weight"].shape[1]
+
+        if in_channels in [36, 48]:
+            model_type = "i2v"
+        elif in_channels == 16:
+            model_type = "t2v"
+        elif "control_adapter.conv.weight" in sd:
+            model_type = "t2v"
+
+        num_heads = 40 if dim == 5120 else 12
+        num_layers = 40 if dim == 5120 else 30
 
         model: nn.Module = torch.nn.utils.skip_init(
-            AsymmDiTJoint,
-            depth=48,
-            patch_size=2,
-            num_heads=24,
-            hidden_size_x=3072,
-            hidden_size_y=1536,
-            mlp_ratio_x=4.0,
-            mlp_ratio_y=4.0,
-            in_channels=12,
-            qk_norm=True,
-            qkv_bias=False,
-            out_bias=True,
-            patch_embed_bias=True,
-            timestep_mlp_bias=True,
-            timestep_scale=1000.0,
-            t5_feat_dim=4096,
-            t5_token_length=256,
-            rope_theta=10000.0,
+            WanModel,
+            dim=dim,
+            in_features=in_features,
+            out_features=out_features,
+            ffn_dim=ffn_dim,
+            ffn2_dim=ffn2_dim,
+            eps=1e-06,
+            freq_dim=256,
+            in_dim=in_channels,
+            model_type=model_type,
+            out_dim=16,
+            text_len=512,
+            num_heads=num_heads,
+            num_layers=num_layers,
             attention_mode=self.kwargs["attention_mode"],
+            rope_func="comfy",
+            inject_sample_info=True if "fps_embedding.weight" in sd else False,
+            add_ref_conv=True if "ref_conv.weight" in sd else False,
+            in_dim_ref_conv=sd["ref_conv.weight"].shape[1] if "ref_conv.weight" in sd else None,
+            add_control_adapter=True if "control_adapter.conv.weight" in sd else False,
         )
 
         if local_rank == 0 or not is_use_fsdp():
