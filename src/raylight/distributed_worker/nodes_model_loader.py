@@ -1,5 +1,21 @@
 import folder_paths
-from .flux.pipeline import FluxMultiGPUPipeline, FluxSingleGPUPipeline
+from .flux.pipeline import (
+    FluxMultiGPUPipeline,
+    FluxSingleGPUPipeline,
+    FluxT5EncoderFactory,
+    FluxClipEncoderFactory,
+    FluxTransfomerFactory,
+    FluxVAEFactory
+)
+
+from .wan.pipeline import (
+    WanMultiGPUPipeline,
+    WanSingleGPUPipeline,
+    WanT5EncoderFactory,
+    WanClipEncoderFactory,
+    WanTransfomerFactory,
+    WanVAEFactory
+)
 
 
 class XFuserModelLoader:
@@ -36,7 +52,7 @@ class XFuserModelLoader:
     CATEGORY = "RayLight"
 
     def load_model(self, model, use_fsdp, t5_model_path, max_t5_token_length,
-            use_xdit, ulysses_degree, ring_degree, cfg_parallel, model_type):
+            use_xdit, ulysses_degree, ring_degree, cfg_parallel, model_type, base_precision):
         global num_gpus, pipeline, model_dir_path
         if pipeline is None:
             if model_type == "flux":
@@ -44,46 +60,53 @@ class XFuserModelLoader:
                 print(f"Launching with {num_gpus} GPUs. If you want to force single GPU mode use CUDA_VISIBLE_DEVICES=0.")
                 klass = FluxSingleGPUPipeline if num_gpus == 1 else FluxMultiGPUPipeline
                 kwargs = dict(
-                    text_encoder_factory=T5ModelFactory(
-                        dtype=dtype,
+                    t5_text_encoder_factory=FluxT5EncoderFactory(
+                        dtype=base_precision,
                     ),
-                    dit_factory=DitModelFactory(
-                        model_path=f"{MOCHI_DIR}/dit.safetensors",
+                    clip_text_encoder_factory=FluxClipEncoderFactory(
+                        model_path=f"{FLUX_DIR}/decoder.safetensors",
+                        dtype=base_precision,
+                    ),
+                    dit_factory=FluxTransfomerFactory(
+                        model_path=f"{FLUX_DIR}/dit.safetensors",
                         model_dtype="bf16",
-                        dtype=dtype,
+                        dtype=base_precision,
                     ),
-                    decoder_factory=DecoderModelFactory(
-                        model_path=f"{MOCHI_DIR}/decoder.safetensors",
-                        dtype=dtype,
+                    vae_factory=FluxVAEFactory(
+                        model_path=f"{FLUX_DIR}/decoder.safetensors",
+                        dtype=base_precision,
                     ),
                 )
-            elif model_type == "wan":
-                MOCHI_DIR = model_dir_path
+
+            if model_type == "wan":
+                WAN_DIR = model
                 print(f"Launching with {num_gpus} GPUs. If you want to force single GPU mode use CUDA_VISIBLE_DEVICES=0.")
-                klass = MochiSingleGPUPipeline if num_gpus == 1 else MochiMultiGPUPipeline
+                klass = WanSingleGPUPipeline if num_gpus == 1 else WanMultiGPUPipeline
                 kwargs = dict(
-                    text_encoder_factory=T5ModelFactory(
-                        dtype=dtype,
+                    t5_text_encoder_factory=WanT5EncoderFactory(
+                        dtype=base_precision,
                     ),
-                    dit_factory=DitModelFactory(
-                        model_path=f"{MOCHI_DIR}/dit.safetensors",
+                    clip_text_encoder_factory=WanClipEncoderFactory(
+                        model_path=f"{WAN_DIR}/decoder.safetensors",
+                        dtype=base_precision,
+                    ),
+                    dit_factory=WanTransfomerFactory(
+                        model_path=f"{WAN_DIR}/dit.safetensors",
                         model_dtype="bf16",
-                        dtype=dtype,
+                        dtype=base_precision,
                     ),
-                    decoder_factory=DecoderModelFactory(
-                        model_path=f"{MOCHI_DIR}/decoder.safetensors",
-                        dtype=dtype,
+                    vae_factory=WanVAEFactory(
+                        model_path=f"{WAN_DIR}/decoder.safetensors",
+                        dtype=base_precision,
                     ),
                 )
+
         if num_gpus > 1:
-            assert not cpu_offload, "CPU offload not supported in multi-GPU mode"
             kwargs["world_size"] = num_gpus
             kwargs["use_xdit"] = use_xdit
             kwargs["ulysses_degree"] = ulysses_degree
             kwargs["ring_degree"] = ring_degree
             kwargs["cfg_parallel"] = cfg_parallel
-        else:
-            kwargs["cpu_offload"] = cpu_offload
         kwargs["use_fsdp"] = use_fsdp
         kwargs["t5_model_path"] = t5_model_path
         kwargs["max_t5_token_length"] = max_t5_token_length
