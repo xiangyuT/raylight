@@ -27,11 +27,11 @@ from torch.distributed.fsdp.wrap import (
     transformer_auto_wrap_policy,
 )
 from transformers import T5Tokenizer
-from model.wanvideo.modules.t5 import T5EncoderModel, T5SelfAttention
-from model.wanvideo.modules.clip import CLIPModel
-from .wanvideo.wan_video_vae import WanVideoVAE
-from model.globals import get_t5_model, get_max_t5_token_length, is_use_fsdp
-from model.globals import set_t5_model, set_max_t5_token_length, set_use_fsdp, set_use_xdit, set_usp_config
+from .model.modules.t5 import T5EncoderModel, T5SelfAttention
+from .model.modules.clip import CLIPModel
+from .model.wan_video_vae import WanVideoVAE
+from .model.globals import get_t5_model, get_max_t5_token_length, is_use_fsdp
+from .model.globals import set_t5_model, set_max_t5_token_length, set_use_fsdp, set_use_xdit, set_usp_config
 from xfuser.core.distributed.parallel_state import (
     get_classifier_free_guidance_world_size,
     get_classifier_free_guidance_rank,
@@ -559,10 +559,78 @@ def move_to_device(model: nn.Module, target_device):
         print(f"moving model from {target_device} -> {og_device}")
     model = model.to(og_device)
 
+class WanSingleGPUPipeline:
+    def __init__(
+        self,
+        *,
+        text_encoder_factory: ModelFactory,
+        dit_factory: ModelFactory,
+        decoder_factory: ModelFactory,
+        cpu_offload: Optional[bool] = False,
+        decode_type: str = "full",
+        decode_args: Optional[Dict[str, Any]] = None,
+        use_fsdp,
+        t5_model_path,
+        max_t5_token_length,
+    ):
+        set_use_fsdp(use_fsdp)
+        set_t5_model(t5_model_path)
+        set_max_t5_token_length(max_t5_token_length)
 
-def t5_tokenizer():
-    return T5Tokenizer.from_pretrained(get_t5_model(), legacy=False)
+        self.device = torch.device("cuda:0")
+        self.tokenizer = t5_tokenizer()
+        t = Timer()
+        self.cpu_offload = cpu_offload
+        self.decode_args = decode_args or {}
+        self.decode_type = decode_type
+        init_id = "cpu" if cpu_offload else 0
+        with t("load_text_encoder"):
+            self.text_encoder = text_encoder_factory.get_model(
+                local_rank=0,
+                device_id=init_id,
+                world_size=1,
+            )
+        with t("load_dit"):
+            self.dit = dit_factory.get_model(local_rank=0, device_id=init_id, world_size=1)
+        with t("load_vae"):
+            self.decoder = decoder_factory.get_model(local_rank=0, device_id=init_id, world_size=1)
+        t.print_stats()
 
+    def __call__(self, batch_cfg, prompt, negative_prompt, **kwargs):
+        with torch.inference_mode():
+            print_max_memory = lambda: print(
+                f"Max memory reserved: {torch.cuda.max_memory_reserved() / 1024**3:.2f} GB"
+            )
+            print_max_memory()
+
+            t = Timer()
+            with t("conditioning"), move_to_device(self.text_encoder, self.device):
+                conditioning = get_conditioning(
+                    self.tokenizer,
+                    self.text_encoder,
+                    self.device,
+                    batch_cfg,
+                    prompt=prompt,
+                    negative_prompt=negative_prompt,
+                )
+            print_max_memory()
+
+            with t("sampling"), move_to_device(self.dit, self.device):
+                latents = sample_model(self.device, self.dit, conditioning, **kwargs)
+            print_max_memory()
+
+            with t("decoding"), move_to_device(self.decoder, self.device):
+                frames = (
+                    decode_latents_tiled_full(self.decoder, latents, **self.decode_args)
+                    if self.decode_type == "tiled_full"
+                    else decode_latents_tiled_spatial(self.decoder, latents, **self.decode_args)
+                    if self.decode_type == "tiled_spatial"
+                    else decode_latents(self.decoder, latents)
+                )
+            print_max_memory()
+
+            t.print_stats()  # Print timing statistics at the end
+            return frames.cpu().numpy()
 
 # == ALL CODE BELOW HERE IS FOR MULTI-GPU MODE == #
 
