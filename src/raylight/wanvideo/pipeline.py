@@ -189,6 +189,23 @@ class WanT5EncoderFactory(ModelFactory):
         return model.eval()
 
 
+class WanClipEncoderFactory(ModelFactory):
+    def __init__(self, *, dtype, model_path: str, model_dtype: str):
+        super().__init__(dtype=dtype, model_path=model_path, model_dtype=model_dtype)
+
+    def get_model(self, *, local_rank, device_id, world_size):
+        super().get_model(local_rank=local_rank, device_id=device_id, world_size=world_size)
+
+        state_dict = load_file(self.get_model, safe_load=True)
+        if "log_scale" not in state_dict:
+            raise ValueError("Invalid CLIP model, this node expectes the 'open-clip-xlm-roberta-large-vit-huge-14' model")
+
+        device = torch.device(f"cuda:{device_id}") if isinstance(device_id, int) else "cpu"
+        model = CLIPModel(dtype=self.dtype, device=device, state_dict=state_dict)
+
+        return model
+
+
 class WanDiTFactory(ModelFactory):
     def __init__(self, *, dtype, model_path: str, model_dtype: str, attention_mode: Optional[str] = None):
         attention_mode = self.kwargs.get("attention_mode", "sdpa")
@@ -335,8 +352,6 @@ class WanVAEFactory(ModelFactory):
         super().__init__(dtype=dtype, model_path=model_path)
 
     def get_model(self, *, local_rank, device_id, world_size):
-        # TODO(ved): Set flag for torch.compile
-
         state_dict = load_file(self.kwargs["model_path"])
 
         has_model_prefix = any(k.startswith("model.") for k in state_dict.keys())
