@@ -28,7 +28,6 @@ class WanVideoModelLoader:
             gguf = True
             merge_loras = False
 
-
         manual_offloading = True
 
         base_dtype = {"fp8_e4m3fn": torch.float8_e4m3fn, "fp8_e4m3fn_fast": torch.float8_e4m3fn, "bf16": torch.bfloat16, "fp16": torch.float16, "fp16_fast": torch.float16, "fp32": torch.float32}[base_precision]
@@ -154,7 +153,7 @@ class WanVideoModelLoader:
             transformer.add_conv_in = torch.nn.Conv3d(add_cond_in_dim, inner_dim, kernel_size=transformer.patch_size, stride=transformer.patch_size)
             transformer.add_proj = zero_module(torch.nn.Linear(inner_dim, inner_dim))
             transformer.attn_conv_in = torch.nn.Conv3d(attn_cond_in_dim, inner_dim, kernel_size=transformer.patch_size, stride=transformer.patch_size)
-
+j
         comfy_model = WanVideoModel(
             WanVideoModelConfig(base_dtype),
             model_type=comfy.model_base.ModelType.FLOW,

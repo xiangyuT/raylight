@@ -29,6 +29,7 @@ from torch.distributed.fsdp.wrap import (
 from transformers import T5Tokenizer
 from model.wanvideo.modules.t5 import T5EncoderModel, T5SelfAttention
 from model.wanvideo.modules.clip import CLIPModel
+from .wanvideo.wan_video_vae import WanVideoVAE
 from model.globals import get_t5_model, get_max_t5_token_length, is_use_fsdp
 from model.globals import set_t5_model, set_max_t5_token_length, set_use_fsdp, set_use_xdit, set_usp_config
 from xfuser.core.distributed.parallel_state import (
@@ -335,28 +336,20 @@ class WanVAEFactory(ModelFactory):
 
     def get_model(self, *, local_rank, device_id, world_size):
         # TODO(ved): Set flag for torch.compile
-        # TODO(ved): Use skip_init
 
-        decoder = Decoder(
-            out_channels=3,
-            base_channels=128,
-            channel_multipliers=[1, 2, 4, 6],
-            temporal_expansions=[1, 2, 3],
-            spatial_expansions=[2, 2, 2],
-            num_res_blocks=[3, 3, 4, 6, 3],
-            latent_dim=12,
-            has_attention=[False, False, False, False, False],
-            output_norm=False,
-            nonlinearity="silu",
-            output_nonlinearity="silu",
-            causal=True,
-        )
-        # VAE is not FSDP-wrapped
         state_dict = load_file(self.kwargs["model_path"])
-        decoder.load_state_dict(state_dict, strict=True)
+
+        has_model_prefix = any(k.startswith("model.") for k in state_dict.keys())
+        if not has_model_prefix:
+            state_dict = {f"model.{k}": v for k, v in state_dict.items()}
+
+        vae = WanVideoVAE(dtype=self.dtype)
+
+        vae.load_state_dict(state_dict, strict=True)
+
         device = torch.device(f"cuda:{device_id}") if isinstance(device_id, int) else "cpu"
-        decoder.eval().to(device, dtype=self.dtype)
-        return decoder
+        vae.eval().to(device, dtype=self.dtype)
+        return vae
 
 
 def get_conditioning(tokenizer, encoder, device, batch_inputs, *, prompt: str, negative_prompt: str):
