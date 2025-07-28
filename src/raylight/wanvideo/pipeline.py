@@ -32,11 +32,11 @@ from .model.modules.clip import CLIPModel
 from .model.wan_video_vae import WanVideoVAE
 from .model.globals import get_t5_model, get_max_t5_token_length, is_use_fsdp
 from .model.globals import set_t5_model, set_max_t5_token_length, set_use_fsdp, set_use_xdit, set_usp_config
-from xfuser.core.distributed.parallel_state import (
-    get_classifier_free_guidance_world_size,
-    get_classifier_free_guidance_rank,
-    get_cfg_group
-)
+# from xfuser.core.distributed.parallel_state import (
+#     get_classifier_free_guidance_world_size,
+#     get_classifier_free_guidance_rank,
+#     get_cfg_group
+# )
 import folder_paths
 
 
@@ -196,7 +196,7 @@ class WanClipEncoderFactory(ModelFactory):
     def get_model(self, *, local_rank, device_id, world_size):
         super().get_model(local_rank=local_rank, device_id=device_id, world_size=world_size)
 
-        state_dict = load_file(self.get_model, safe_load=True)
+        state_dict = load_file(self.kwargs["model_path"])
         if "log_scale" not in state_dict:
             raise ValueError("Invalid CLIP model, this node expectes the 'open-clip-xlm-roberta-large-vit-huge-14' model")
 

@@ -198,7 +198,7 @@ class VisionTransformer(nn.Module):
             kernel_size=patch_size,
             stride=patch_size,
             bias=not pre_norm)
-        
+
         if pool_type in ('token', 'token_fc'):
             self.cls_embedding = nn.Parameter(gain * torch.randn(1, 1, dim))
         self.pos_embedding = nn.Parameter(gain * torch.randn(
@@ -224,7 +224,7 @@ class VisionTransformer(nn.Module):
     def forward(self, x, interpolation=False, use_31_block=False):
         b = x.size(0)
         height, width = x.size(2), x.size(3)
-        
+
         # embeddings
         x_patch = self.patch_embedding(x)
         B, C, H, W = x_patch.shape
