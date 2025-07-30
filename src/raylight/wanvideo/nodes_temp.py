@@ -6,6 +6,32 @@ import sys
 import os
 import types
 
+ray.init()
+
+class RayActor:
+    def __init__(self):
+        self.model = None
+        self.run_fn = None
+
+    def load_model(self, load_fn, *args, **kwargs):
+        self.model = load_fn(*args, **kwargs)
+        return f"Model loaded: {type(self.model)}"
+
+    def set_run_fn(self, run_fn):
+        self.run_fn = run_fn
+        return "Run function registered."
+
+    def run_model(self, *args, **kwargs):
+        if self.model is None:
+            raise RuntimeError("Model not loaded.")
+        if self.run_fn is None:
+            raise RuntimeError("Run function not set.")
+        return self.run_fn(self.model, *args, **kwargs)
+
+RemoteActor = ray.remote(RayActor)
+actor = RemoteActor.options(name="wanclip-general").remote()
+
+
 def print_custom_node_modules(node_folder_name="raylight"):
     print(f"\n--- Loaded modules under '{node_folder_name}' ---")
 
@@ -13,21 +39,7 @@ def print_custom_node_modules(node_folder_name="raylight"):
         if name.startswith(node_folder_name):
             print(f"{name} → {getattr(module, '__file__', 'built-in or dynamically created')}")
 
-# --- Ensure 'raylight' module is importable by Ray ---
-raylight_path = os.path.abspath(os.path.join(__file__, "../.."))
-if raylight_path not in sys.path:
-    sys.path.insert(0, raylight_path)
 
-# --- Import actor ---
-from ..distributed_worker import RayActor
-
-# --- Patch sys.modules so Ray workers can import this actor ---
-module_name = "raylight.distributed_worker"
-if module_name not in sys.modules:
-    # Register a fake module and attach the class
-    fake_module = types.ModuleType(module_name)
-    fake_module.RayActor = RayActor
-    sys.modules[module_name] = fake_module
 
 class GeneralRayInitializer:
     @classmethod
@@ -45,16 +57,24 @@ class GeneralRayInitializer:
     CATEGORY = "Raylight"
 
     def spawn_actor(self, ray_cluster_address, ray_cluster_namespace):
-        print_custom_node_modules("raylight")
-        try:
-            ray.init(address=ray_cluster_address, namespace=ray_cluster_namespace)
-        except Exception as e:
-            ray.init(namespace=ray_cluster_namespace)
-            raise RuntimeError(f"Ray connection failed: {e}")
 
-        RemoteActor = ray.remote(RayActor)
-        actor = RemoteActor.options(name="wanclip-general").remote()
-        return (actor,)
+#         try:
+#             ray.init(
+#                 runtime_env={
+#                     "py_modules": ["/home/kxn/ComfyShard/ComfyUI/custom_nodes/raylight/src"]
+#                 },
+#                 address=ray_cluster_address, namespace=ray_cluster_namespace)
+#         except Exception as e:
+#             ray.init(
+#                 runtime_env={
+#                     "py_modules": ["/home/kxn/ComfyShard/ComfyUI/custom_nodes/raylight/src"]
+#                 },
+#                 namespace=ray_cluster_namespace)
+#             raise RuntimeError(f"Ray connection failed: {e}")
+#
+#        RemoteActor = ray.remote(RayActor)
+#        actor = RemoteActor.options(name="wanclip-general").remote()
+        return ("hello",)
 
 
 class RayWanClipLoader:
@@ -62,7 +82,6 @@ class RayWanClipLoader:
     def INPUT_TYPES(s):
         return {
             "required": {
-                "ray_actor": ("RAY_ACTOR",),
                 "model_name": (folder_paths.get_filename_list("clip_vision"),),
                 "precision": (["fp16", "fp32", "bf16"], {"default": "fp16"}),
             }
