@@ -9,13 +9,6 @@ from einops import repeat, rearrange
 # from ...enhance_a_video.enhance import get_feta_scores
 
 try:
-    from torch.nn.attention.flex_attention import create_block_mask, flex_attention, BlockMask
-    create_block_mask = torch.compile(create_block_mask)
-    flex_attention = torch.compile(flex_attention)
-except:
-    BlockMask = create_block_mask = flex_attention = None
-    pass
-try:
     from ..radial_attention.attn_mask import RadialSpargeSageAttn, RadialSpargeSageAttnDense, MaskMap
 except:
     pass

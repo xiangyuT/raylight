@@ -3,10 +3,8 @@ import folder_paths
 import torch
 import ray
 import sys
-import os
-import types
+import raylight
 
-ray.init()
 
 class RayActor:
     def __init__(self):
@@ -28,19 +26,6 @@ class RayActor:
             raise RuntimeError("Run function not set.")
         return self.run_fn(self.model, *args, **kwargs)
 
-RemoteActor = ray.remote(RayActor)
-actor = RemoteActor.options(name="wanclip-general").remote()
-
-
-def print_custom_node_modules(node_folder_name="raylight"):
-    print(f"\n--- Loaded modules under '{node_folder_name}' ---")
-
-    for name, module in sys.modules.items():
-        if name.startswith(node_folder_name):
-            print(f"{name} → {getattr(module, '__file__', 'built-in or dynamically created')}")
-
-
-
 class GeneralRayInitializer:
     @classmethod
     def INPUT_TYPES(s):
@@ -57,24 +42,23 @@ class GeneralRayInitializer:
     CATEGORY = "Raylight"
 
     def spawn_actor(self, ray_cluster_address, ray_cluster_namespace):
+        try:
+            ray.init(
+                ray_cluster_address,
+                namespace=ray_cluster_namespace,
+                runtime_env={
+                    "py_modules": [raylight]
+                })
+        except Exception as e:
+            ray.init(
+                runtime_env={
+                    "py_modules": [raylight]
+                })
+            raise RuntimeError(f"Ray connection failed: {e}")
 
-#         try:
-#             ray.init(
-#                 runtime_env={
-#                     "py_modules": ["/home/kxn/ComfyShard/ComfyUI/custom_nodes/raylight/src"]
-#                 },
-#                 address=ray_cluster_address, namespace=ray_cluster_namespace)
-#         except Exception as e:
-#             ray.init(
-#                 runtime_env={
-#                     "py_modules": ["/home/kxn/ComfyShard/ComfyUI/custom_nodes/raylight/src"]
-#                 },
-#                 namespace=ray_cluster_namespace)
-#             raise RuntimeError(f"Ray connection failed: {e}")
-#
-#        RemoteActor = ray.remote(RayActor)
-#        actor = RemoteActor.options(name="wanclip-general").remote()
-        return ("hello",)
+        RemoteActor = ray.remote(RayActor)
+        actor = RemoteActor.options(num_gpus=1, name="wanclip-general").remote()
+        return (actor,)
 
 
 class RayWanClipLoader:
@@ -82,8 +66,9 @@ class RayWanClipLoader:
     def INPUT_TYPES(s):
         return {
             "required": {
+                "ray_actor": ("RAY_ACTOR",),
                 "model_name": (folder_paths.get_filename_list("clip_vision"),),
-                "precision": (["fp16", "fp32", "bf16"], {"default": "fp16"}),
+                "precision": (["float16", "float32", "bfloat16"], {"default": "float16"}),
             }
         }
 
@@ -101,7 +86,7 @@ class RayWanClipLoader:
                 dtype=getattr(torch, precision),
                 model_dtype=getattr(torch, precision)
             )
-            return clip.get_model(local_rank=0, device_id="cuda:0", world_size=1).model
+            return clip.get_model(local_rank=0, device_id="0", world_size=1).model
 
         ray.get(ray_actor.load_model.remote(clip_loader, model_path, precision))
 
