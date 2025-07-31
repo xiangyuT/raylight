@@ -1,9 +1,12 @@
 import sys
 import os
 
-"""Top-level package for raylight."""
-
-
+# Comfy dynamic lib loader cause the module imported as a path instead of normal python path
+# e.g /home/user/ComfyUI/custom_nodes/raylight.src.raylight.etc
+# this code will change it into :
+# raylight.wanvideo or raylight.flux
+# this is done since ray cluster needs libs to run in this case raylight.
+# ray.init(runtime_env={"py_modules":[raylight]})
 this_dir = os.path.dirname(os.path.realpath(__file__))
 src_dir = os.path.join(this_dir, "src")
 if src_dir not in sys.path:

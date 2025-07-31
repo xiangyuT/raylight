@@ -57,7 +57,7 @@ class GeneralRayInitializer:
             raise RuntimeError(f"Ray connection failed: {e}")
 
         RemoteActor = ray.remote(RayActor)
-        actor = RemoteActor.options(num_gpus=1, name="wanclip-general").remote()
+        actor = RemoteActor.options(name="wanclip-general").remote()
         return (actor,)
 
 

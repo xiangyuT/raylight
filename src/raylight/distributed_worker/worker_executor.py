@@ -29,6 +29,9 @@ class MultiGPUContext:
         # TORCH DIST WILL COMPLAIN
         # Internally python pickle an object to be distributed,
         # and it must see certain conf or var to work properly hence global it.
+        self.model = None
+        self.model_name = None
+        self.run_fn = None
         set_global_config()
         t = Timer()
         self.device = torch.device(f"cuda:{device_id}")
@@ -102,13 +105,24 @@ class MultiGPUContext:
                         classifier_free_guidance_degree=2,
                     )
 
-        self.tokenizer = model_tokenizer["cfg"]
-        with t("load_text_encoder"):
-            self.text_encoder = text_encoder_factory.get_model(**distributed_kwargs)
-        with t("load_dit"):
-            self.dit = dit_factory.get_model(**distributed_kwargs)
-        with t("load_vae"):
-            self.decoder = decoder_factory.get_model(**distributed_kwargs)
+        def load_model(self, load_fn, *args, **kwargs):
+            model_name = kwargs.get("model_name")
+
+            if self.model is not None and self.model_name == model_name:
+                return f"Model already loaded: {type(self.model)}"
+
+            with t(f"loading model: {model_name}"):
+                self.model = load_fn(*args, **kwargs)
+                self.model_name = model_name
+                return f"Model loaded: {type(self.model)}"
+
+        #self.tokenizer = model_tokenizer["cfg"]
+        #with t("load_text_encoder"):
+        #    self.text_encoder = text_encoder_factory.get_model(**distributed_kwargs)
+        #with t("load_dit"):
+        #    self.dit = dit_factory.get_model(**distributed_kwargs)
+        #with t("load_vae"):
+        #    self.decoder = decoder_factory.get_model(**distributed_kwargs)
 
         t.print_stats()
 
