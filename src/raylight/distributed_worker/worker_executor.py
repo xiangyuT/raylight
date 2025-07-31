@@ -3,8 +3,10 @@
 # Manually control torch.distribute using torch.mp.spawn is pain, so ray is the solution
 # Based on vLLM and XDit (XFuser) implementation
 import os
+import gc
 import torch
 import torch.distributed as dist
+from comfy import model_management as mm
 
 
 class MultiGPUContext:
@@ -33,7 +35,6 @@ class MultiGPUContext:
         self.model_name = None
         self.run_fn = None
         set_global_config()
-        t = Timer()
         self.device = torch.device(f"cuda:{device_id}")
         print(f"Initializing rank {local_rank+1}/{world_size}")
         assert world_size > 1, f"Multi-GPU mode requires world_size > 1, got {world_size}"
@@ -105,16 +106,22 @@ class MultiGPUContext:
                         classifier_free_guidance_degree=2,
                     )
 
-        def load_model(self, load_fn, *args, **kwargs):
-            model_name = kwargs.get("model_name")
+    def load_model(self, load_fn, *args, **kwargs):
+        model_name = kwargs.get("model_name")
+        t = Timer()
 
-            if self.model is not None and self.model_name == model_name:
-                return f"Model already loaded: {type(self.model)}"
+        if self.model is not None and self.model_name == model_name:
+            return f"Model already loaded: {type(self.model)}"
 
-            with t(f"loading model: {model_name}"):
-                self.model = load_fn(*args, **kwargs)
-                self.model_name = model_name
-                return f"Model loaded: {type(self.model)}"
+        with t(f"loading model: {model_name}"):
+            mm.unload_all_models()
+            mm.soft_empty_cache()
+            gc.collect()
+            self.model = load_fn(*args, **kwargs)
+            self.model_name = model_name
+            t.print_stats()
+            return f"Model loaded: {type(self.model)}"
+
 
         #self.tokenizer = model_tokenizer["cfg"]
         #with t("load_text_encoder"):
@@ -123,8 +130,6 @@ class MultiGPUContext:
         #    self.dit = dit_factory.get_model(**distributed_kwargs)
         #with t("load_vae"):
         #    self.decoder = decoder_factory.get_model(**distributed_kwargs)
-
-        t.print_stats()
 
     def run(self, *, fn, **kwargs):
         return fn(self, **kwargs)

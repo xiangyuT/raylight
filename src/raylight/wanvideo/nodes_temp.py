@@ -26,6 +26,7 @@ class RayActor:
             raise RuntimeError("Run function not set.")
         return self.run_fn(self.model, *args, **kwargs)
 
+
 class GeneralRayInitializer:
     @classmethod
     def INPUT_TYPES(s):
@@ -57,7 +58,7 @@ class GeneralRayInitializer:
             raise RuntimeError(f"Ray connection failed: {e}")
 
         RemoteActor = ray.remote(RayActor)
-        actor = RemoteActor.options(name="wanclip-general").remote()
+        actor = RemoteActor.options(num_gpus=1, name="wanclip-general").remote()
         return (actor,)
 
 
