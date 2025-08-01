@@ -1,3 +1,4 @@
+import sys
 import logging
 import folder_paths
 
@@ -40,7 +41,7 @@ def load_diffusion_model_state_dict(sd, model_options={}):
         sd = temp_sd
 
     parameters = comfy.utils.calculate_parameters(sd)
-    print(f"{parameters=}")
+    print(f"{diffusion_model_prefix=}")
     weight_dtype = comfy.utils.weight_dtype(sd)
 
     load_device = comfy.model_management.get_torch_device()
@@ -122,9 +123,10 @@ class XFuserUNETLoader:
             model_options["fp8_optimizations"] = True
         elif weight_dtype == "fp8_e5m2":
             model_options["dtype"] = torch.float8_e5m2
-
+        print(sys.path)
         unet_path = folder_paths.get_full_path_or_raise("diffusion_models", unet_name)
         model = load_diffusion_model(unet_path, model_options=model_options)
+        print(help(model))
         return (model,)
 
 
