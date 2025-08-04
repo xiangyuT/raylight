@@ -5,6 +5,8 @@ import torch
 import comfy
 import folder_paths
 
+import raylight
+
 ## GLOBAL SETTER ##
 from typing import Tuple
 
@@ -184,6 +186,41 @@ class XFuserLoraLoaderModelOnly:
         return (model_lora)
 
 
+class RayInitializer:
+    @classmethod
+    def INPUT_TYPES(s):
+        return {
+            "required": {
+                "ray_cluster_address": ("STRING", {"default": "local"}),
+                "ray_cluster_namespace": ("STRING", {"default": "default"}),
+            }
+        }
+
+    RETURN_TYPES = ("RAY_ACTOR",)
+    RETURN_NAMES = ("ray_actor",)
+    FUNCTION = "spawn_actor"
+    CATEGORY = "Raylight"
+
+    def spawn_actor(self, ray_cluster_address, ray_cluster_namespace):
+        try:
+            ray.init(
+                ray_cluster_address,
+                namespace=ray_cluster_namespace,
+                runtime_env={
+                    "py_modules": [raylight]
+                })
+        except Exception as e:
+            ray.init(
+                runtime_env={
+                    "py_modules": [raylight]
+                })
+            raise RuntimeError(f"Ray connection failed: {e}")
+
+        RemoteActor = ray.remote(RayWorker)
+        actor = RemoteActor.options(num_gpus=1, name="wanclip-general").remote()
+        return (actor,)
+
+
 class XFuserUNETLoader:
     @classmethod
     def INPUT_TYPES(s):
@@ -208,3 +245,16 @@ class XFuserUNETLoader:
         unet_path = folder_paths.get_full_path_or_raise("diffusion_models", unet_name)
         model = comfy.sd.load_diffusion_model(unet_path, model_options=model_options)
         return (model,)
+
+
+NODE_CLASS_MAPPINGS = {
+    "XFuserUNETLoader": XFuserUNETLoader,
+    "XFuserLoraLoaderModelOnly": XFuserLoraLoaderModelOnly,
+    "RayInitializer": RayInitializer,
+}
+
+NODE_DISPLAY_NAME_MAPPINGS = {
+    "XFuserUNETLoader": "Load Diffusion Model (Ray)",
+    "XFuserLoraLoaderModelOnly": "Load Lora Model (Ray)",
+    "RayInitializer": "Ray Init Actor",
+}
