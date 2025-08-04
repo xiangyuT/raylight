@@ -5,23 +5,16 @@ import folder_paths
 
 ray.init()
 
-
-class Loader:
-    def __init__(self):
-        self.child_hello = "child hello"
-        self.model = None
-
-    def get_model(self, model_path):
-        self.model = dict(model_path=torch.rand(3, 4))
-
-    def return_child(self):
-        return
-
-
 @ray.remote
 class RayWorker:
-    def __init__(self, hello):
+    def __init__(self):
         self.model = None
+
+    """
+    Theoritical way of using this probably
+    instance_RayWorker.load_unet.remote(*args, **kwargs)
+
+    """
 
     def load_unet(self, unet_name, weight_dtype):
         model_options = {}
@@ -36,29 +29,23 @@ class RayWorker:
         unet_path = folder_paths.get_full_path_or_raise("diffusion_models", unet_name)
         self.model = comfy.sd.load_diffusion_model(unet_path, model_options=model_options)
 
-    def load_lora(self, model, lora_name, strength_model):
-        if strength_model == 0:
-            return (model,)
+    """
+    instance_RayWorker.load_lora.remote(*args, **kwargs)
+    """
 
-        lora_path = folder_paths.get_full_path_or_raise("loras", lora_name)
-        lora = None
-        if self.loaded_lora is not None:
-            if self.loaded_lora[0] == lora_path:
-                lora = self.loaded_lora[1]
-            else:
-                self.loaded_lora = None
-
-        if lora is None:
-            lora = comfy.utils.load_torch_file(lora_path, safe_load=True)
-            self.loaded_lora = (lora_path, lora)
-
-        self.model = comfy.sd.load_lora_for_models(model, None, lora, strength_model, 0)[0]
+    def load_lora(self, lora, strength_model):
+        self.model = comfy.sd.load_lora_for_models(self.model, None, lora, strength_model, 0)[0]
         return (self.model)
 
+    """
+    instance_RayWorker.common_ksampler.remote(*args, **kwargs)
+    (TODO, komikndr) Check if comfy will unload non required model (TE, VAE, etc) before sampling
+    (TODO, komikndr) tdqm will not work or any print status really since it is ray
+    """
 
-    def common_ksampler(model, seed, steps, cfg, sampler_name, scheduler, positive, negative, latent, denoise=1.0, disable_noise=False, start_step=None, last_step=None, force_full_denoise=False):
+    def common_ksampler(self, seed, steps, cfg, sampler_name, scheduler, positive, negative, latent, denoise=1.0, disable_noise=False, start_step=None, last_step=None, force_full_denoise=False):
         latent_image = latent["samples"]
-        latent_image = comfy.sample.fix_empty_latent_channels(model, latent_image)
+        latent_image = comfy.sample.fix_empty_latent_channels(self.model, latent_image)
 
         if disable_noise:
             noise = torch.zeros(latent_image.size(), dtype=latent_image.dtype, layout=latent_image.layout, device="cpu")
@@ -71,13 +58,12 @@ class RayWorker:
             noise_mask = latent["noise_mask"]
 
         disable_pbar = not comfy.utils.PROGRESS_BAR_ENABLED
-        samples = comfy.sample.sample(model, noise, steps, cfg, sampler_name, scheduler, positive, negative, latent_image,
+        samples = comfy.sample.sample(self.model, noise, steps, cfg, sampler_name, scheduler, positive, negative, latent_image,
                                       denoise=denoise, disable_noise=disable_noise, start_step=start_step, last_step=last_step,
                                       force_full_denoise=force_full_denoise, noise_mask=noise_mask, disable_pbar=disable_pbar, seed=seed)
         out = latent.copy()
         out["samples"] = samples
         return (out, )
-
 
 
 class XFuserLoraLoaderModelOnly:

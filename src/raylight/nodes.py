@@ -1,106 +1,156 @@
-import sys
-import logging
+import ray
+import torch
+import comfy
 import folder_paths
 
-import torch
+## GLOBAL SETTER ##
+from typing import Tuple
 
-import comfy
 
+_USE_XDIT = False
 
-def load_diffusion_model_state_dict(sd, model_options={}):
-    """
-    ------------------------------
-    COPY DIRECTLY FROM comfy.sd.py
-    ------------------------------
-    Loads a UNet diffusion model from a state dictionary, supporting both diffusers and regular formats.
+def set_use_xdit(use_dit: bool) -> None:
+    """Set whether to use DIT model.
 
     Args:
-        sd (dict): State dictionary containing model weights and configuration
-        model_options (dict, optional): Additional options for model loading. Supports:
-            - dtype: Override model data type
-            - custom_operations: Custom model operations
-            - fp8_optimizations: Enable FP8 optimizations
-
-    Returns:
-        ModelPatcher: A wrapped model instance that handles device management and weight loading.
-        Returns None if the model configuration cannot be detected.
-
-    The function:
-    1. Detects and handles different model formats (regular, diffusers, mmdit)
-    2. Configures model dtype based on parameters and device capabilities
-    3. Handles weight conversion and device placement
-    4. Manages model optimization settings
-    5. Loads weights and returns a device-managed model instance
+        use_dit: Boolean flag indicating whether to use xdur
     """
-    dtype = model_options.get("dtype", None)
+    global _USE_XDIT
+    _USE_XDIT = use_dit
+    print(f"The xDiT flag use_xdit={use_dit}")
 
-    # Allow loading unets from checkpoint files
-    diffusion_model_prefix = comfy.model_detection.unet_prefix_from_state_dict(sd)
-    temp_sd = comfy.utils.state_dict_prefix_replace(sd, {diffusion_model_prefix: ""}, filter_keys=True)
-    if len(temp_sd) > 0:
-        sd = temp_sd
+def is_use_xdit() -> bool:
+    return _USE_XDIT
 
-    parameters = comfy.utils.calculate_parameters(sd)
-    print(f"{diffusion_model_prefix=}")
-    weight_dtype = comfy.utils.weight_dtype(sd)
+_ULYSSES_DEGREE = None
+_RING_DEGREE = None
+_CFG_PARALLEL = None
 
-    load_device = comfy.model_management.get_torch_device()
-    model_config = comfy.model_detection.model_config_from_unet(sd, "")
+def set_usp_config(ulysses_degree : int, ring_degree : int, cfg_parallel : bool) -> None:
+    global _ULYSSES_DEGREE, _RING_DEGREE, _CFG_PARALLEL
+    _ULYSSES_DEGREE = ulysses_degree
+    _RING_DEGREE = ring_degree
+    _CFG_PARALLEL = cfg_parallel
+    print(f"Now we use xdit with ulysses degree {ulysses_degree}, ring degree {ring_degree}, and CFG parallel {cfg_parallel}")
 
-    if model_config is not None:
-        new_sd = sd
-    else:
-        new_sd = comfy.model_detection.convert_diffusers_mmdit(sd, "")
-        if new_sd is not None:  # diffusers mmdit
-            model_config = comfy.model_detection.model_config_from_unet(new_sd, "")
-            if model_config is None:
-                return None
-        else:  # diffusers unet
-            model_config = comfy.model_detection.model_config_from_diffusers_unet(sd)
-            if model_config is None:
-                return None
+def get_usp_config() -> Tuple[int, int, bool]:
+    return _ULYSSES_DEGREE, _RING_DEGREE, _CFG_PARALLEL
 
-            diffusers_keys = comfy.utils.unet_to_diffusers(model_config.unet_config)
+_USE_FSDP = False
 
-            new_sd = {}
-            for k in diffusers_keys:
-                if k in sd:
-                    new_sd[diffusers_keys[k]] = sd.pop(k)
-                else:
-                    logging.warning("{} {}".format(diffusers_keys[k], k))
+def set_use_fsdp(use_fsdp: bool) -> None:
+    global _USE_FSDP
+    _USE_FSDP = use_fsdp
+    print(f"The FSDP flag use_fsdp={use_fsdp}")
 
-    offload_device = comfy.model_management.unet_offload_device()
-    unet_weight_dtype = list(model_config.supported_inference_dtypes)
-    if model_config.scaled_fp8 is not None:
-        weight_dtype = None
-
-    if dtype is None:
-        unet_dtype = comfy.model_management.unet_dtype(model_params=parameters, supported_dtypes=unet_weight_dtype, weight_dtype=weight_dtype)
-    else:
-        unet_dtype = dtype
-
-    manual_cast_dtype = comfy.model_management.unet_manual_cast(unet_dtype, load_device, model_config.supported_inference_dtypes)
-    model_config.set_inference_dtype(unet_dtype, manual_cast_dtype)
-    model_config.custom_operations = model_options.get("custom_operations", model_config.custom_operations)
-    if model_options.get("fp8_optimizations", False):
-        model_config.optimizations["fp8"] = True
-
-    model = model_config.get_model(new_sd, "")
-    model = model.to(offload_device)
-    model.load_model_weights(new_sd, "")
-    left_over = sd.keys()
-    if len(left_over) > 0:
-        logging.info("left over keys in diffusion model: {}".format(left_over))
-    return comfy.model_patcher.ModelPatcher(model, load_device=load_device, offload_device=offload_device)
+def is_use_fsdp() -> bool:
+    return _USE_FSDP
 
 
-def load_diffusion_model(unet_path, model_options={}):
-    sd = comfy.utils.load_torch_file(unet_path)
-    model = load_diffusion_model_state_dict(sd, model_options=model_options)
-    if model is None:
-        logging.error("ERROR UNSUPPORTED DIFFUSION MODEL {}".format(unet_path))
-        raise RuntimeError("ERROR: Could not detect model type of: {}\n{}".format(unet_path, comfy.model_detection_error_hint(unet_path, sd)))
-    return model
+ray.init()
+
+
+class RayWorker:
+    def __init__(self):
+        self.model = None
+        # Unused
+        self.device_id = None
+        self.world_size = None
+        self.decode_type = None
+        self.decode_args = None
+        self.use_fsdp = None
+        self.use_xdit = None
+        self.ulysses_degree = None
+        self.ring_degree = None
+        self.cfg_parallel = None
+
+    """
+    Theoritical way of using this probably
+    instance_RayWorker.load_unet.remote(*args, **kwargs)
+
+    """
+
+    def load_unet(self, unet_name, weight_dtype):
+        model_options = {}
+        if weight_dtype == "fp8_e4m3fn":
+            model_options["dtype"] = torch.float8_e4m3fn
+        elif weight_dtype == "fp8_e4m3fn_fast":
+            model_options["dtype"] = torch.float8_e4m3fn
+            model_options["fp8_optimizations"] = True
+        elif weight_dtype == "fp8_e5m2":
+            model_options["dtype"] = torch.float8_e5m2
+
+        unet_path = folder_paths.get_full_path_or_raise("diffusion_models", unet_name)
+        self.model = comfy.sd.load_diffusion_model(unet_path, model_options=model_options)
+
+    """
+    instance_RayWorker.load_lora.remote(*args, **kwargs)
+    """
+
+    def load_lora(self, lora, strength_model):
+        self.model = comfy.sd.load_lora_for_models(self.model, None, lora, strength_model, 0)[0]
+        return (self.model)
+
+    """
+    instance_RayWorker.common_ksampler.remote(*args, **kwargs)
+    (TODO, komikndr) Check if comfy will unload non required model (TE, VAE, etc) before sampling
+    (TODO, komikndr) tdqm will not work or any print status really since it is ray
+    """
+
+    def common_ksampler(self, seed, steps, cfg, sampler_name, scheduler, positive, negative, latent, denoise=1.0, disable_noise=False, start_step=None, last_step=None, force_full_denoise=False):
+        latent_image = latent["samples"]
+        latent_image = comfy.sample.fix_empty_latent_channels(self.model, latent_image)
+
+        if disable_noise:
+            noise = torch.zeros(latent_image.size(), dtype=latent_image.dtype, layout=latent_image.layout, device="cpu")
+        else:
+            batch_inds = latent["batch_index"] if "batch_index" in latent else None
+            noise = comfy.sample.prepare_noise(latent_image, seed, batch_inds)
+
+        noise_mask = None
+        if "noise_mask" in latent:
+            noise_mask = latent["noise_mask"]
+
+        disable_pbar = not comfy.utils.PROGRESS_BAR_ENABLED
+        samples = comfy.sample.sample(self.model, noise, steps, cfg, sampler_name, scheduler, positive, negative, latent_image,
+                                      denoise=denoise, disable_noise=disable_noise, start_step=start_step, last_step=last_step,
+                                      force_full_denoise=force_full_denoise, noise_mask=noise_mask, disable_pbar=disable_pbar, seed=seed)
+        out = latent.copy()
+        out["samples"] = samples
+        return (out, )
+
+
+class XFuserLoraLoaderModelOnly:
+    @classmethod
+    def INPUT_TYPES(s):
+        return {
+            "required": {
+                "model": ("MODEL", {"tooltip": "The diffusion model the LoRA will be applied to."}),
+                "lora_name": (folder_paths.get_filename_list("loras"), {"tooltip": "The name of the LoRA."}),
+                "strength_model": ("FLOAT", {"default": 1.0, "min": -100.0, "max": 100.0, "step": 0.01, "tooltip": "How strongly to modify the diffusion model. This value can be negative."}),
+            }
+        }
+    RETURN_TYPES = ("MODEL",)
+    FUNCTION = "load_lora"
+
+    def load_lora(self, model, lora_name, strength_model):
+        if strength_model == 0:
+            return (model,)
+
+        lora_path = folder_paths.get_full_path_or_raise("loras", lora_name)
+        lora = None
+        if self.loaded_lora is not None:
+            if self.loaded_lora[0] == lora_path:
+                lora = self.loaded_lora[1]
+            else:
+                self.loaded_lora = None
+
+        if lora is None:
+            lora = comfy.utils.load_torch_file(lora_path, safe_load=True)
+            self.loaded_lora = (lora_path, lora)
+
+        model_lora = comfy.sd.load_lora_for_models(model, None, lora, strength_model, 0)[0]
+        return (model_lora)
 
 
 class XFuserUNETLoader:
@@ -123,17 +173,7 @@ class XFuserUNETLoader:
             model_options["fp8_optimizations"] = True
         elif weight_dtype == "fp8_e5m2":
             model_options["dtype"] = torch.float8_e5m2
-        print(sys.path)
+
         unet_path = folder_paths.get_full_path_or_raise("diffusion_models", unet_name)
-        model = load_diffusion_model(unet_path, model_options=model_options)
-        print(help(model))
+        model = comfy.sd.load_diffusion_model(unet_path, model_options=model_options)
         return (model,)
-
-
-NODE_CLASS_MAPPINGS = {
-    "XFuserUNETLoader": XFuserUNETLoader,
-}
-
-NODE_DISPLAY_NAME_MAPPINGS = {
-    "XFuserUNETLoader": "Load XFuser Diffusion Model",
-}
