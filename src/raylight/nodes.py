@@ -1,3 +1,5 @@
+import types
+
 import ray
 import torch
 import comfy
@@ -63,6 +65,35 @@ class RayWorker:
         self.ulysses_degree = None
         self.ring_degree = None
         self.cfg_parallel = None
+
+    """
+    Just Placeholder for now, since without USP it is just
+    using both gpu to sample different latent
+    """
+
+    def patch_usp(self):
+
+        # Just place holder so LSP not complaining
+        def usp_dit_forward():
+            pass
+
+        def usp_self_attn_patch():
+            pass
+
+        block_len = len(self.model.model.diffusion_model.blocks)
+        model_options = {
+            "dtype": torch.float8_e4m3fn,
+            "transformer_options": {
+                "patches_replace": {
+                    "dit": {
+                        **{("self_attn", i): usp_self_attn_patch for i in range(block_len)}
+                    }
+                }
+            }
+        }
+
+        self.model.model_options = model_options
+        self.model.model.diffusion_model.forward = types.MethodType(usp_dit_forward, self.model.model.diffusion_model)
 
     """
     Theoritical way of using this probably
