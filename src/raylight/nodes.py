@@ -298,7 +298,7 @@ class XFuserUNETLoader:
                 "weight_dtype": (
                     ["default", "fp8_e4m3fn", "fp8_e4m3fn_fast", "fp8_e5m2"],
                 ),
-                "ray_actor": (
+                "ray_actors": (
                     "RAY_ACTORS",
                     {"tooltip": "Ray Actor to submit the model into"},
                 ),
