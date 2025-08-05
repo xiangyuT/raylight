@@ -65,7 +65,7 @@ def is_use_fsdp() -> bool:
 class RayWorker:
     def __init__(self, local_rank):
         self.model = None
-        self.local_rank = None
+        self.local_rank = local_rank
         print("Initializing Local Rank: ", self.local_rank)
         # Unused
         self.device_id = None
@@ -399,8 +399,9 @@ class XFuserKSamplerAdvanced:
         if add_noise == "disable":
             disable_noise = True
 
+        final_sample = []
         for actor in ray_actors:
-            final_sample = actor.common_ksampler.remote(
+            final_sample.append(actor.common_ksampler.remote(
                 noise_seed,
                 steps,
                 cfg,
@@ -414,9 +415,9 @@ class XFuserKSamplerAdvanced:
                 start_step=start_at_step,
                 last_step=end_at_step,
                 force_full_denoise=force_full_denoise,
-            )
+            ))
 
-        return (ray.get(final_sample[0]), ray.get(final_sample[1]),)
+        return (ray.get(final_sample)[0], ray.get(final_sample)[0],)
 
 
 NODE_CLASS_MAPPINGS = {
