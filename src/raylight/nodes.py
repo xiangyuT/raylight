@@ -280,6 +280,7 @@ class RayInitializer:
             raise RuntimeError(f"Ray connection failed: {e}")
 
         world_size = torch.cuda.device_count()
+        print(f"currnt world size: {world_size}")
         RemoteActor = ray.remote(RayWorker)
 
         actors = []
@@ -414,7 +415,8 @@ class XFuserKSamplerAdvanced:
                 last_step=end_at_step,
                 force_full_denoise=force_full_denoise,
             )
-        return ray.get(final_sample[0], final_sample[1])
+
+        return (ray.get(final_sample[0]), ray.get(final_sample[1]),)
 
 
 NODE_CLASS_MAPPINGS = {
