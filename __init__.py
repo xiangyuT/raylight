@@ -12,8 +12,11 @@ src_dir = os.path.join(this_dir, "src")
 if src_dir not in sys.path:
     sys.path.insert(0, src_dir)
 
+comfy_dir = os.path.abspath(os.path.join(this_dir, "../../comfy"))
+if comfy_dir not in sys.path:
+    sys.path.insert(0, comfy_dir)
 
-from raylight.wanvideo.nodes_temp import NODE_CLASS_MAPPINGS, NODE_DISPLAY_NAME_MAPPINGS
+
 from raylight.nodes import NODE_CLASS_MAPPINGS, NODE_DISPLAY_NAME_MAPPINGS
 
 __all__ = [
