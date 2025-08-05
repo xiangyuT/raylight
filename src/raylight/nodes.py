@@ -408,7 +408,7 @@ class XFuserKSamplerAdvanced:
             last_step=end_at_step,
             force_full_denoise=force_full_denoise,
         )
-        return final_sample
+        return ray.get(final_sample)
 
 
 NODE_CLASS_MAPPINGS = {
