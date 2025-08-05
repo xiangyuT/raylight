@@ -63,6 +63,10 @@ def is_use_fsdp() -> bool:
 
 
 class RayWorker:
+
+    master_address = None
+    master_port = None
+
     def __init__(self, local_rank):
         self.model = None
         self.local_rank = local_rank
@@ -116,9 +120,7 @@ class RayWorker:
         )
 
     """
-    Theoritical way of using this probably
     instance_RayWorker.load_unet.remote(*args, **kwargs)
-
     """
 
     def load_unet(self, unet_path, model_options):
@@ -139,8 +141,6 @@ class RayWorker:
 
     """
     instance_RayWorker.common_ksampler.remote(*args, **kwargs)
-    (TODO, komikndr) Check if comfy will unload non required model (TE, VAE, etc) before sampling
-    (TODO, komikndr) tdqm will not work or any print status really since it is ray
     """
 
     def common_ksampler(
@@ -202,57 +202,6 @@ class RayWorker:
         return (out,)
 
 
-class XFuserLoraLoaderModelOnly:
-    @classmethod
-    def INPUT_TYPES(s):
-        return {
-            "required": {
-                "model": (
-                    "MODEL",
-                    {"tooltip": "The diffusion model the LoRA will be applied to."},
-                ),
-                "lora_name": (
-                    folder_paths.get_filename_list("loras"),
-                    {"tooltip": "The name of the LoRA."},
-                ),
-                "strength_model": (
-                    "FLOAT",
-                    {
-                        "default": 1.0,
-                        "min": -100.0,
-                        "max": 100.0,
-                        "step": 0.01,
-                        "tooltip": "How strongly to modify the diffusion model. This value can be negative.",
-                    },
-                ),
-            }
-        }
-
-    RETURN_TYPES = ("MODEL",)
-    FUNCTION = "load_lora"
-
-    def load_lora(self, model, lora_name, strength_model):
-        if strength_model == 0:
-            return (model,)
-
-        lora_path = folder_paths.get_full_path_or_raise("loras", lora_name)
-        lora = None
-        if self.loaded_lora is not None:
-            if self.loaded_lora[0] == lora_path:
-                lora = self.loaded_lora[1]
-            else:
-                self.loaded_lora = None
-
-        if lora is None:
-            lora = comfy.utils.load_torch_file(lora_path, safe_load=True)
-            self.loaded_lora = (lora_path, lora)
-
-        model_lora = comfy.sd.load_lora_for_models(
-            model, None, lora, strength_model, 0
-        )[0]
-        return model_lora
-
-
 class RayInitializer:
     @classmethod
     def INPUT_TYPES(s):
@@ -285,9 +234,65 @@ class RayInitializer:
 
         actors = []
         for local_rank in range(world_size):
-            actors.append(RemoteActor.options(num_gpus=1, name="wanclip-general").remote(local_rank=local_rank))
+            actors.append(RemoteActor.options(num_gpus=1, name="RayWorker:{local_rank}").remote(local_rank=local_rank))
 
         return (actors,)
+
+
+class XFuserLoraLoaderModelOnly:
+    def __init__(self):
+        self.loaded_lora = None
+
+    @classmethod
+    def INPUT_TYPES(s):
+        return {
+            "required": {
+                "ray_actors": (
+                    "RAY_ACTORS",
+                    {"tooltip": "Ray Actor to submit the model into"},
+                ),
+                "lora_name": (
+                    folder_paths.get_filename_list("loras"),
+                    {"tooltip": "The name of the LoRA."},
+                ),
+                "strength_model": (
+                    "FLOAT",
+                    {
+                        "default": 1.0,
+                        "min": -100.0,
+                        "max": 100.0,
+                        "step": 0.01,
+                        "tooltip": "How strongly to modify the diffusion model. This value can be negative.",
+                    },
+                ),
+            }
+        }
+
+    RETURN_TYPES = ("RAY_ACTORS",)
+    RETURN_NAMES = ("ray_actors",)
+    FUNCTION = "load_lora"
+    CATEGORY = "Raylight"
+
+    def load_lora(self, ray_actors, lora_name, strength_model):
+        if strength_model == 0:
+            return (ray_actors,)
+
+        lora_path = folder_paths.get_full_path_or_raise("loras", lora_name)
+        lora = None
+        if self.loaded_lora is not None:
+            if self.loaded_lora[0] == lora_path:
+                lora = self.loaded_lora[1]
+            else:
+                self.loaded_lora = None
+
+        if lora is None:
+            lora = comfy.utils.load_torch_file(lora_path, safe_load=True)
+            self.loaded_lora = (lora_path, lora)
+
+        for actor in ray_actors:
+            actor.load_lora.remote(lora, strength_model)
+
+        return (ray_actors,)
 
 
 class XFuserUNETLoader:
@@ -310,7 +315,7 @@ class XFuserUNETLoader:
     RETURN_NAMES = ("ray_actors", "model_size")
     FUNCTION = "load_ray_unet"
 
-    CATEGORY = "advanced/loaders"
+    CATEGORY = "Raylight"
 
     def load_ray_unet(self, ray_actors, unet_name, weight_dtype):
         model_options = {}
@@ -373,7 +378,7 @@ class XFuserKSamplerAdvanced:
     RETURN_TYPES = ("LATENT", "LATENT",)
     FUNCTION = "ray_sample"
 
-    CATEGORY = "sampling"
+    CATEGORY = "Raylight"
 
     def ray_sample(
         self,
@@ -417,7 +422,7 @@ class XFuserKSamplerAdvanced:
                 force_full_denoise=force_full_denoise,
             ))
 
-        return (ray.get(final_sample)[0], ray.get(final_sample)[0],)
+        return (ray.get(final_sample[0])[0], ray.get(final_sample[1])[0],)
 
 
 NODE_CLASS_MAPPINGS = {
