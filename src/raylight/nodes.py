@@ -328,7 +328,6 @@ class XFuserKSamplerAdvanced:
     def INPUT_TYPES(s):
         return {
             "required": {
-                "model": ("MODEL",),
                 "add_noise": (["enable", "disable"],),
                 "noise_seed": (
                     "INT",
