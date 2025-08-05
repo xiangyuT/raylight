@@ -229,12 +229,12 @@ class RayInitializer:
             raise RuntimeError(f"Ray connection failed: {e}")
 
         world_size = torch.cuda.device_count()
-        print(f"currnt world size: {world_size}")
+        print(f"current world size: {world_size}")
         RemoteActor = ray.remote(RayWorker)
 
         actors = []
         for local_rank in range(world_size):
-            actors.append(RemoteActor.options(num_gpus=1, name="RayWorker:{local_rank}").remote(local_rank=local_rank))
+            actors.append(RemoteActor.options(num_gpus=1, name=f"RayWorker:{local_rank}").remote(local_rank=local_rank))
 
         return (actors,)
 
@@ -405,9 +405,9 @@ class XFuserKSamplerAdvanced:
             disable_noise = True
 
         final_sample = []
-        for actor in ray_actors:
+        for additional_noise, actor in enumerate(ray_actors):
             final_sample.append(actor.common_ksampler.remote(
-                noise_seed,
+                noise_seed + additional_noise,
                 steps,
                 cfg,
                 sampler_name,
