@@ -5,7 +5,7 @@ import torch
 import comfy
 import folder_paths
 
-from comfy import sd
+from comfy import sd, sample, utils
 
 import raylight
 
@@ -80,6 +80,7 @@ class RayWorker:
     Just Placeholder for now, since without USP it is just
     using both gpu to sample different latent
     """
+
     def get_sys_path(self):
         return sys.path
 
@@ -129,7 +130,7 @@ class RayWorker:
     """
 
     def load_lora(self, lora, strength_model):
-        self.model = sd.load_lora_for_models(
+        self.model = comfy.sd.load_lora_for_models(
             self.model, None, lora, strength_model, 0
         )[0]
         return self.model
@@ -297,8 +298,8 @@ class XFuserUNETLoader:
             }
         }
 
-    RETURN_TYPES = ("RAY_ACTOR","STRING")
-    RETURN_NAMES = ("ray_actor","model_size")
+    RETURN_TYPES = ("RAY_ACTOR", "STRING")
+    RETURN_NAMES = ("ray_actor", "model_size")
     FUNCTION = "load_ray_unet"
 
     CATEGORY = "advanced/loaders"
@@ -316,16 +317,110 @@ class XFuserUNETLoader:
         unet_path = folder_paths.get_full_path_or_raise("diffusion_models", unet_name)
         z = ray.get(ray_actor.load_unet.remote(unet_path, model_options=model_options))
         print(z)
-        return (ray_actor, z, )
+        return (
+            ray_actor,
+            z,
+        )
+
+
+class XFuserKSamplerAdvanced:
+    @classmethod
+    def INPUT_TYPES(s):
+        return {
+            "required": {
+                "model": ("MODEL",),
+                "add_noise": (["enable", "disable"],),
+                "noise_seed": (
+                    "INT",
+                    {
+                        "default": 0,
+                        "min": 0,
+                        "max": 0xFFFFFFFFFFFFFFFF,
+                        "control_after_generate": True,
+                    },
+                ),
+                "steps": ("INT", {"default": 20, "min": 1, "max": 10000}),
+                "cfg": (
+                    "FLOAT",
+                    {
+                        "default": 8.0,
+                        "min": 0.0,
+                        "max": 100.0,
+                        "step": 0.1,
+                        "round": 0.01,
+                    },
+                ),
+                "sampler_name": (comfy.samplers.KSampler.SAMPLERS,),
+                "scheduler": (comfy.samplers.KSampler.SCHEDULERS,),
+                "positive": ("CONDITIONING",),
+                "negative": ("CONDITIONING",),
+                "latent_image": ("LATENT",),
+                "start_at_step": ("INT", {"default": 0, "min": 0, "max": 10000}),
+                "end_at_step": ("INT", {"default": 10000, "min": 0, "max": 10000}),
+                "return_with_leftover_noise": (["disable", "enable"],),
+                "ray_actor": (
+                    "RAY_ACTOR",
+                    {"tooltip": "Ray Actor to submit the model into"},
+                ),
+            }
+        }
+
+    RETURN_TYPES = ("LATENT",)
+    FUNCTION = "ray_sample"
+
+    CATEGORY = "sampling"
+
+    def ray_sample(
+        self,
+        ray_actor,
+        add_noise,
+        noise_seed,
+        steps,
+        cfg,
+        sampler_name,
+        scheduler,
+        positive,
+        negative,
+        latent_image,
+        start_at_step,
+        end_at_step,
+        return_with_leftover_noise,
+        denoise=1.0,
+    ):
+        force_full_denoise = True
+        if return_with_leftover_noise == "enable":
+            force_full_denoise = False
+        disable_noise = False
+        if add_noise == "disable":
+            disable_noise = True
+
+        final_sample = ray_actor.common_ksampler.remote(
+            noise_seed,
+            steps,
+            cfg,
+            sampler_name,
+            scheduler,
+            positive,
+            negative,
+            latent_image,
+            denoise=denoise,
+            disable_noise=disable_noise,
+            start_step=start_at_step,
+            last_step=end_at_step,
+            force_full_denoise=force_full_denoise,
+        )
+        return final_sample
 
 
 NODE_CLASS_MAPPINGS = {
+    "XFuserKSamplerAdvanced": XFuserKSamplerAdvanced,
     "XFuserUNETLoader": XFuserUNETLoader,
     "XFuserLoraLoaderModelOnly": XFuserLoraLoaderModelOnly,
     "RayInitializer": RayInitializer,
 }
 
 NODE_DISPLAY_NAME_MAPPINGS = {
+    "XFuserKSamplerAdvanced": "XFuser KSampler Advanced",
     "XFuserUNETLoader": "Load Diffusion Model (Ray)",
     "XFuserLoraLoaderModelOnly": "Load Lora Model (Ray)",
     "RayInitializer": "Ray Init Actor",
