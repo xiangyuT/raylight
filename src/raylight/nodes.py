@@ -63,8 +63,10 @@ def is_use_fsdp() -> bool:
 
 
 class RayWorker:
-    def __init__(self):
+    def __init__(self, local_rank):
         self.model = None
+        self.local_rank = None
+        print("Initializing Local Rank: ", self.local_rank)
         # Unused
         self.device_id = None
         self.world_size = None
@@ -261,8 +263,8 @@ class RayInitializer:
             }
         }
 
-    RETURN_TYPES = ("RAY_ACTOR",)
-    RETURN_NAMES = ("ray_actor",)
+    RETURN_TYPES = ("RAY_ACTORS",)
+    RETURN_NAMES = ("ray_actors",)
     FUNCTION = "spawn_actor"
     CATEGORY = "Raylight"
 
@@ -277,9 +279,14 @@ class RayInitializer:
             ray.init(runtime_env={"py_modules": [raylight]})
             raise RuntimeError(f"Ray connection failed: {e}")
 
+        world_size = torch.cuda.device_count()
         RemoteActor = ray.remote(RayWorker)
-        actor = RemoteActor.options(num_gpus=1, name="wanclip-general").remote()
-        return (actor,)
+
+        actors = []
+        for local_rank in range(world_size):
+            actors.append(RemoteActor.options(num_gpus=1, name="wanclip-general").remote(local_rank=local_rank))
+
+        return (actors,)
 
 
 class XFuserUNETLoader:
@@ -292,19 +299,19 @@ class XFuserUNETLoader:
                     ["default", "fp8_e4m3fn", "fp8_e4m3fn_fast", "fp8_e5m2"],
                 ),
                 "ray_actor": (
-                    "RAY_ACTOR",
+                    "RAY_ACTORS",
                     {"tooltip": "Ray Actor to submit the model into"},
                 ),
             }
         }
 
-    RETURN_TYPES = ("RAY_ACTOR", "STRING")
-    RETURN_NAMES = ("ray_actor", "model_size")
+    RETURN_TYPES = ("RAY_ACTORS", "STRING")
+    RETURN_NAMES = ("ray_actors", "model_size")
     FUNCTION = "load_ray_unet"
 
     CATEGORY = "advanced/loaders"
 
-    def load_ray_unet(self, ray_actor, unet_name, weight_dtype):
+    def load_ray_unet(self, ray_actors, unet_name, weight_dtype):
         model_options = {}
         if weight_dtype == "fp8_e4m3fn":
             model_options["dtype"] = torch.float8_e4m3fn
@@ -315,12 +322,10 @@ class XFuserUNETLoader:
             model_options["dtype"] = torch.float8_e5m2
 
         unet_path = folder_paths.get_full_path_or_raise("diffusion_models", unet_name)
-        z = ray.get(ray_actor.load_unet.remote(unet_path, model_options=model_options))
-        print(z)
-        return (
-            ray_actor,
-            z,
-        )
+
+        for actor in ray_actors:
+            actor.load_unet.remote(unet_path, model_options=model_options)
+        return (ray_actors,)
 
 
 class XFuserKSamplerAdvanced:
@@ -357,21 +362,21 @@ class XFuserKSamplerAdvanced:
                 "start_at_step": ("INT", {"default": 0, "min": 0, "max": 10000}),
                 "end_at_step": ("INT", {"default": 10000, "min": 0, "max": 10000}),
                 "return_with_leftover_noise": (["disable", "enable"],),
-                "ray_actor": (
-                    "RAY_ACTOR",
+                "ray_actors": (
+                    "RAY_ACTORS",
                     {"tooltip": "Ray Actor to submit the model into"},
                 ),
             }
         }
 
-    RETURN_TYPES = ("LATENT",)
+    RETURN_TYPES = ("LATENT", "LATENT",)
     FUNCTION = "ray_sample"
 
     CATEGORY = "sampling"
 
     def ray_sample(
         self,
-        ray_actor,
+        ray_actors,
         add_noise,
         noise_seed,
         steps,
@@ -393,22 +398,23 @@ class XFuserKSamplerAdvanced:
         if add_noise == "disable":
             disable_noise = True
 
-        final_sample = ray_actor.common_ksampler.remote(
-            noise_seed,
-            steps,
-            cfg,
-            sampler_name,
-            scheduler,
-            positive,
-            negative,
-            latent_image,
-            denoise=denoise,
-            disable_noise=disable_noise,
-            start_step=start_at_step,
-            last_step=end_at_step,
-            force_full_denoise=force_full_denoise,
-        )
-        return ray.get(final_sample)
+        for actor in ray_actors:
+            final_sample = actor.common_ksampler.remote(
+                noise_seed,
+                steps,
+                cfg,
+                sampler_name,
+                scheduler,
+                positive,
+                negative,
+                latent_image,
+                denoise=denoise,
+                disable_noise=disable_noise,
+                start_step=start_at_step,
+                last_step=end_at_step,
+                force_full_denoise=force_full_denoise,
+            )
+        return ray.get(final_sample[0], final_sample[1])
 
 
 NODE_CLASS_MAPPINGS = {
