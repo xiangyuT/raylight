@@ -50,9 +50,9 @@ class RayInitializer:
 
         # Currenty not implementing CFG parallel, since LoRa can enable non cfg run
         world_size = GPU
-        max_world_size = torch.cuda.device_count()
-        if world_size > max_world_size:
-            raise ValueError("To many gpus")
+        #max_world_size = torch.xpu.device_count()
+        #if world_size > max_world_size:
+        #    raise ValueError("To many gpus")
         if world_size == 0:
             raise ValueError("Num of cuda/cudalike device is 0")
         if world_size < ulysses_degree * ring_degree:
@@ -101,7 +101,7 @@ class RayInitializer:
         gpu_actors = []
         for local_rank in range(world_size):
             gpu_actors.append(
-                gpu_actor.options(num_gpus=1, name=f"RayWorker:{local_rank}").remote(
+                gpu_actor.options(name=f"RayWorker:{local_rank}").remote(
                     local_rank=local_rank,
                     world_size=world_size,
                     device_id=0,

@@ -98,6 +98,9 @@ def usp_inject_callback(
         )
 
 
+import intel_extension_for_pytorch
+import oneccl_bindings_for_pytorch
+
 class RayWorker:
     def __init__(self, local_rank, world_size, device_id, parallel_dict):
         self.model = None
@@ -109,7 +112,7 @@ class RayWorker:
 
         self.parallel_dict = parallel_dict
         self.parallel_dict["is_fsdp_wrapped"] = False
-        self.device = torch.device(f"cuda:{self.device_id}")
+        self.device = torch.device(f"xpu:{self.device_id}")
 
         if self.model is not None:
             self.is_model_load = True
@@ -117,9 +120,10 @@ class RayWorker:
             self.is_model_load = False
 
         if self.parallel_dict["is_xdit"] or self.parallel_dict["is_fsdp"]:
-            os.environ["CUDA_VISIBLE_DEVICES"] = str(self.device_id)
+            #os.environ["CUDA_VISIBLE_DEVICES"] = str(self.device_id)
+            torch.xpu.set_device(local_rank)
             dist.init_process_group(
-                "nccl",
+                "ccl",
                 rank=local_rank,
                 world_size=self.world_size,
                 timeout=timedelta(minutes=1)
@@ -303,8 +307,8 @@ class RayWorker:
             out["samples"] = samples
 
         # Temporary for reducing change of OOM before VAE
-        if ray.get_runtime_context().get_accelerator_ids()["GPU"][0] == "0":
-            self.model.detach()
+        #if ray.get_runtime_context().get_accelerator_ids()["GPU"][0] == "0":
+        #    self.model.detach()
         self.model.detach()
         comfy.model_management.soft_empty_cache()
         gc.collect()
