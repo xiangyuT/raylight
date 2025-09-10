@@ -98,7 +98,11 @@ def usp_inject_callback(
         )
 
 
-import intel_extension_for_pytorch
+try:
+    import intel_extension_for_pytorch as ipex
+except:
+    pass
+
 import oneccl_bindings_for_pytorch
 
 class RayWorker:
