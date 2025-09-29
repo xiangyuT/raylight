@@ -109,6 +109,13 @@ def usp_inject_callback(
 # If called from ray actor within. dist.barrier() become the sync.
 
 # Comfy cli args, does not get pass through into ray actor
+try:
+    import intel_extension_for_pytorch as ipex
+except:
+    pass
+
+# import oneccl_bindings_for_pytorch
+
 class RayWorker:
     def __init__(self, local_rank, world_size, device_id, parallel_dict):
         self.model = None
@@ -120,22 +127,27 @@ class RayWorker:
         self.world_size = world_size
         self.device_id = device_id
         self.parallel_dict = parallel_dict
-        self.device = torch.device(f"cuda:{self.device_id}")
+        # self.device = torch.device(f"cuda:{self.device_id}")
         self.device_mesh = None
-        self.compute_capability = int("{}{}".format(*torch.cuda.get_device_capability()))
+        # self.compute_capability = int("{}{}".format(*torch.cuda.get_device_capability()))
+        self.compute_capability = 86  # For Intel GPU, just set to 8.6 for now
+        
+        self.parallel_dict["is_fsdp_wrapped"] = False
+        self.device = torch.device(f"xpu:{self.device_id}")
 
         self.is_model_loaded = False
 
         if self.parallel_dict["is_xdit"] or self.parallel_dict["is_fsdp"]:
-            os.environ["CUDA_VISIBLE_DEVICES"] = str(self.device_id)
+            #os.environ["CUDA_VISIBLE_DEVICES"] = str(self.device_id)
+            torch.xpu.set_device(local_rank)
             dist.init_process_group(
-                "nccl",
+                "xccl",
                 rank=local_rank,
                 world_size=self.world_size,
                 timeout=timedelta(minutes=1),
                 # device_id=self.device
             )
-            self.device_mesh = dist.device_mesh.init_device_mesh("cuda", mesh_shape=(self.world_size,))
+            self.device_mesh = dist.device_mesh.init_device_mesh("xpu", mesh_shape=(self.world_size,))
             pg = dist.group.WORLD
             cp.set_cp_group(pg, list(range(self.world_size)), local_rank)
         else:
@@ -361,12 +373,12 @@ class RayWorker:
             out = latent.copy()
             out["samples"] = samples
 
-        if ray.get_runtime_context().get_accelerator_ids()["GPU"][0] and self.parallel_dict["is_fsdp"] == "0":
-            self.model.detach()
+        # if ray.get_runtime_context().get_accelerator_ids()["GPU"][0] and self.parallel_dict["is_fsdp"] == "0":
+            # self.model.detach()
 
         # I haven't implemented for non FSDP detached, so all rank model will be move into RAM
-        else:
-            self.model.detach()
+        # else:
+        self.model.detach()
         comfy.model_management.soft_empty_cache()
         gc.collect()
         return (out,)
@@ -377,11 +389,13 @@ class RayNCCLTester:
         local_rank = local_rank
         world_size = world_size
         device_id = device_id
-        device = torch.device(f"cuda:{device_id}")
-        os.environ["CUDA_VISIBLE_DEVICES"] = str(device_id)
+        # device = torch.device(f"cuda:{device_id}")
+        # os.environ["CUDA_VISIBLE_DEVICES"] = str(device_id)
+        device = torch.device(f"xpu:{device_id}")
+        os.environ["ZE_AFFINITY_MASK"] = str(device_id)
 
         dist.init_process_group(
-            "nccl",
+            "xccl",
             rank=local_rank,
             world_size=world_size,
             timeout=timedelta(minutes=1),
@@ -421,7 +435,7 @@ def ray_nccl_tester(world_size):
 
     for local_rank in range(world_size):
         gpu_actors.append(
-            gpu_actor.options(num_gpus=1, name=f"RayTest:{local_rank}").remote(
+            gpu_actor.options(name=f"RayTest:{local_rank}").remote(
                 local_rank=local_rank,
                 world_size=world_size,
                 device_id=0,
@@ -449,7 +463,7 @@ def make_ray_actor_fn(
 
         for local_rank in range(world_size):
             gpu_actors.append(
-                gpu_actor.options(num_gpus=1, name=f"RayWorker:{local_rank}").remote(
+                gpu_actor.options(name=f"RayWorker:{local_rank}").remote(
                     local_rank=local_rank,
                     world_size=world_size,
                     device_id=0,

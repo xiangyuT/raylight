@@ -62,10 +62,10 @@ class RayInitializerDebug:
         os.environ["TOKENIZERS_PARALLELISM"] = "false"
         self.parallel_dict = dict()
 
-
         # Currenty not implementing CFG parallel, since LoRa can enable non cfg run
         world_size = GPU
-        max_world_size = torch.cuda.device_count()
+        # max_world_size = torch.cuda.device_count()
+        max_world_size = 8  # For Intel GPU, just set max to 8 for now
         if world_size > max_world_size:
             raise ValueError("To many gpus")
 
