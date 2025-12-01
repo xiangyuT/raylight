@@ -58,7 +58,7 @@ class RayWorker:
         self.device_mesh = None
         # self.compute_capability = int("{}{}".format(*torch.cuda.get_device_capability()))
         self.compute_capability = 86  # For Intel GPU, just set to 8.6 for now
-        
+
         self.parallel_dict["is_fsdp_wrapped"] = False
         self.device = torch.device(f"xpu:{self.device_id}")
 
@@ -69,18 +69,19 @@ class RayWorker:
         os.environ["NCCL_DEBUG"] = "WARN"
 
         if self.parallel_dict["is_xdit"] or self.parallel_dict["is_fsdp"]:
-            #os.environ["CUDA_VISIBLE_DEVICES"] = str(self.device_id)
+            # os.environ["CUDA_VISIBLE_DEVICES"] = str(self.device_id)
             torch.xpu.set_device(local_rank)
             dist.init_process_group(
                 "xccl",
                 rank=local_rank,
-                world_size=self.world_size,
+                world_size=self.global_world_size,
                 timeout=timedelta(minutes=1),
                 # device_id=self.device
             )
-            self.device_mesh = dist.device_mesh.init_device_mesh("xpu", mesh_shape=(self.world_size,))
-            # pg = dist.group.WORLD
-            # cp.set_cp_group(pg, list(range(self.world_size)), local_rank)
+            self.device_mesh = dist.device_mesh.init_device_mesh(
+                "xpu", mesh_shape=(self.global_world_size,)
+            )
+
         else:
             print(f"Running Ray in normal seperate sampler with: {self.global_world_size} number of workers")
 
@@ -382,10 +383,10 @@ class RayWorker:
             out = latent.copy()
             out["samples"] = samples
 
-        if ray.get_runtime_context().get_accelerator_ids()["GPU"][0] and self.parallel_dict["is_fsdp"] == "0":
-            self.model.detach()
-        else:
-            self.model.detach()
+        # if ray.get_runtime_context().get_accelerator_ids()["GPU"][0] and self.parallel_dict["is_fsdp"] == "0":
+        #     self.model.detach()
+        # else:
+        self.model.detach()
         comfy.model_management.soft_empty_cache()
         gc.collect()
         return out
@@ -458,7 +459,7 @@ class RayWorker:
             out["samples"] = samples
 
         # if ray.get_runtime_context().get_accelerator_ids()["GPU"][0] and self.parallel_dict["is_fsdp"] == "0":
-            # self.model.detach()
+        # self.model.detach()
 
         # I haven't implemented for non FSDP detached, so all rank model will be move into RAM
         # else:
@@ -485,8 +486,8 @@ class RayCOMMTester:
             timeout=timedelta(minutes=1),
             device_id=device
         )
-        pg = dist.group.WORLD
-        cp.set_cp_group(pg, list(range(world_size)), local_rank)
+        # pg = dist.group.WORLD
+        # cp.set_cp_group(pg, list(range(world_size)), local_rank)
 
         print("Running NCCL COMM pre-run")
 
