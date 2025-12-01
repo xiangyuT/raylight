@@ -4,6 +4,7 @@ from xfuser.core.long_ctx_attention import (
 
 from yunchang.kernels import AttnType
 _ATTN_TYPE = None
+_SYNC_ULYSSES = None
 
 
 def set_attn_type(attn):
@@ -18,9 +19,27 @@ def get_attn_type():
         return _ATTN_TYPE
 
 
-def make_xfuser_attention(attn_type):
-    print(f"Using XFuser {attn_type} attention")
-    if attn_type.upper() == "FLASH_ATTN":
+def set_sync_ulysses(is_sync):
+    global _SYNC_ULYSSES
+    _SYNC_ULYSSES = is_sync
+
+
+def get_sync_ulysses():
+    if _SYNC_ULYSSES is None:
+        raise RuntimeError("_SYNC_ULYSSES variable is not initialized")
+    else:
+        return _SYNC_ULYSSES
+
+
+def make_xfuser_attention(attn_type, sync_ulysses):
+    print(f"Using XFuser {attn_type} attention, Sync Ulysses: {sync_ulysses}")
+    if attn_type.upper() == "AITER_ROCM":
+        try:
+            attn = AttnType.AITER
+        except:
+            print("Manual AITER ROCm attention overide failed or not available, please install manually latest Yunchang main repo")
+            attn = AttnType.TORCH
+    elif attn_type.upper() == "FLASH_ATTN":
         attn = AttnType.FA
     elif attn_type.upper() == "FLASH_ATTN_3":
         attn = AttnType.FA3
@@ -37,7 +56,7 @@ def make_xfuser_attention(attn_type):
     else:
         attn = AttnType.TORCH
 
-    xfuser_attn = xFuserLongContextAttention(attn_type=attn)
+    xfuser_attn = xFuserLongContextAttention(use_sync=sync_ulysses, attn_type=attn)
 
     def _attention_xfuser_unmask(q, k, v, heads, join_q=None, join_k=None, join_v=None, mask=None, attn_precision=None, skip_reshape=False, skip_output_reshape=False):
         if skip_reshape:
@@ -90,3 +109,4 @@ def make_xfuser_attention(attn_type):
         return out
 
     return _attention_xfuser_unmask
+

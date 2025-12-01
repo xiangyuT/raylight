@@ -1,8 +1,8 @@
 {
   "id": "74d472ce-c2b2-4c7b-aabc-51b7428dee99",
   "revision": 0,
-  "last_node_id": 65,
-  "last_link_id": 77,
+  "last_node_id": 66,
+  "last_link_id": 82,
   "nodes": [
     {
       "id": 9,
@@ -94,7 +94,7 @@
         {
           "name": "samples",
           "type": "LATENT",
-          "link": 70
+          "link": 82
         },
         {
           "name": "vae",
@@ -341,82 +341,6 @@
       "bgcolor": "#653"
     },
     {
-      "id": 44,
-      "type": "XFuserKSamplerAdvanced",
-      "pos": [
-        939.8338623046875,
-        58.839481353759766
-      ],
-      "size": [
-        304.748046875,
-        334
-      ],
-      "flags": {},
-      "order": 16,
-      "mode": 0,
-      "inputs": [
-        {
-          "name": "ray_actors",
-          "type": "RAY_ACTORS",
-          "link": 77
-        },
-        {
-          "name": "positive",
-          "type": "CONDITIONING",
-          "link": 67
-        },
-        {
-          "name": "negative",
-          "type": "CONDITIONING",
-          "link": 68
-        },
-        {
-          "name": "latent_image",
-          "type": "LATENT",
-          "link": 69
-        }
-      ],
-      "outputs": [
-        {
-          "name": "LATENT",
-          "type": "LATENT",
-          "links": [
-            70
-          ]
-        },
-        {
-          "name": "LATENT",
-          "type": "LATENT",
-          "links": null
-        },
-        {
-          "name": "LATENT",
-          "type": "LATENT",
-          "links": null
-        },
-        {
-          "name": "LATENT",
-          "type": "LATENT",
-          "links": null
-        }
-      ],
-      "properties": {
-        "Node name for S&R": "XFuserKSamplerAdvanced"
-      },
-      "widgets_values": [
-        "enable",
-        278657825202021,
-        "randomize",
-        20,
-        1,
-        "euler",
-        "simple",
-        0,
-        10000,
-        "disable"
-      ]
-    },
-    {
       "id": 27,
       "type": "EmptySD3LatentImage",
       "pos": [
@@ -437,7 +361,7 @@
           "type": "LATENT",
           "slot_index": 0,
           "links": [
-            69
+            81
           ]
         }
       ],
@@ -478,7 +402,7 @@
           "name": "output",
           "type": "*",
           "links": [
-            68
+            80
           ]
         }
       ],
@@ -513,7 +437,7 @@
           "name": "output",
           "type": "*",
           "links": [
-            67
+            79
           ]
         }
       ],
@@ -586,7 +510,7 @@
           "name": "ray_actors",
           "type": "RAY_ACTORS",
           "links": [
-            77
+            78
           ]
         }
       ],
@@ -681,6 +605,67 @@
       ],
       "color": "#232",
       "bgcolor": "#353"
+    },
+    {
+      "id": 66,
+      "type": "XFuserKSamplerAdvanced",
+      "pos": [
+        920.8460693359375,
+        73.85623168945312
+      ],
+      "size": [
+        304.748046875,
+        334
+      ],
+      "flags": {},
+      "order": 16,
+      "mode": 0,
+      "inputs": [
+        {
+          "name": "ray_actors",
+          "type": "RAY_ACTORS",
+          "link": 78
+        },
+        {
+          "name": "positive",
+          "type": "CONDITIONING",
+          "link": 79
+        },
+        {
+          "name": "negative",
+          "type": "CONDITIONING",
+          "link": 80
+        },
+        {
+          "name": "latent_image",
+          "type": "LATENT",
+          "link": 81
+        }
+      ],
+      "outputs": [
+        {
+          "name": "LATENT",
+          "type": "LATENT",
+          "links": [
+            82
+          ]
+        }
+      ],
+      "properties": {
+        "Node name for S&R": "XFuserKSamplerAdvanced"
+      },
+      "widgets_values": [
+        "enable",
+        0,
+        "randomize",
+        20,
+        1,
+        "euler",
+        "simple",
+        0,
+        10000,
+        "disable"
+      ]
     }
   ],
   "links": [
@@ -715,38 +700,6 @@
       40,
       0,
       "*"
-    ],
-    [
-      67,
-      40,
-      0,
-      44,
-      1,
-      "CONDITIONING"
-    ],
-    [
-      68,
-      39,
-      0,
-      44,
-      2,
-      "CONDITIONING"
-    ],
-    [
-      69,
-      27,
-      0,
-      44,
-      3,
-      "LATENT"
-    ],
-    [
-      70,
-      44,
-      0,
-      8,
-      0,
-      "LATENT"
     ],
     [
       71,
@@ -789,25 +742,57 @@
       "RAY_ACTORS"
     ],
     [
-      77,
+      78,
       65,
       0,
-      44,
+      66,
       0,
       "RAY_ACTORS"
+    ],
+    [
+      79,
+      40,
+      0,
+      66,
+      1,
+      "CONDITIONING"
+    ],
+    [
+      80,
+      39,
+      0,
+      66,
+      2,
+      "CONDITIONING"
+    ],
+    [
+      81,
+      27,
+      0,
+      66,
+      3,
+      "LATENT"
+    ],
+    [
+      82,
+      66,
+      0,
+      8,
+      0,
+      "LATENT"
     ]
   ],
   "groups": [],
   "config": {},
   "extra": {
     "ds": {
-      "scale": 0.8,
+      "scale": 1.1712800000000003,
       "offset": [
-        839.7367772498073,
-        149.44821531645164
+        -343.6997195741803,
+        166.05227241637644
       ]
     },
-    "frontendVersion": "1.26.13"
+    "frontendVersion": "1.26.11"
   },
   "version": 0.4
 }

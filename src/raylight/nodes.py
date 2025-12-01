@@ -13,7 +13,7 @@ from comfy import sd, sample, utils
 from .distributed_worker.ray_worker import (
     make_ray_actor_fn,
     ensure_fresh_actors,
-    ray_nccl_tester
+    ray_nccl_tester,
 )
 
 
@@ -27,18 +27,24 @@ class RayInitializer:
                 "GPU": ("INT", {"default": 2}),
                 "ulysses_degree": ("INT", {"default": 2}),
                 "ring_degree": ("INT", {"default": 1}),
+                "cfg_degree": ("INT", {"default": 1}),
+                "sync_ulysses": ("BOOLEAN", {"default": False}),
                 "FSDP": ("BOOLEAN", {"default": False}),
                 "FSDP_CPU_OFFLOAD": ("BOOLEAN", {"default": False}),
-                "XFuser_attention": ([
-                    "TORCH",
-                    "FLASH_ATTN",
-                    "FLASH_ATTN_3",
-                    "SAGE_AUTO_DETECT",
-                    "SAGE_FP16_TRITON",
-                    "SAGE_FP16_CUDA",
-                    "SAGE_FP8_CUDA",
-                    "SAGE_FP8_SM90"
-                ], {"default": "TORCH"})
+                "XFuser_attention": (
+                    [
+                        "TORCH",
+                        "FLASH_ATTN",
+                        "FLASH_ATTN_3",
+                        "SAGE_AUTO_DETECT",
+                        "SAGE_FP16_TRITON",
+                        "SAGE_FP16_CUDA",
+                        "SAGE_FP8_CUDA",
+                        "SAGE_FP8_SM90",
+                        "AITER_ROCM",
+                    ],
+                    {"default": "TORCH"},
+                ),
             }
         }
 
@@ -55,44 +61,53 @@ class RayInitializer:
         GPU,
         ulysses_degree,
         ring_degree,
+        cfg_degree,
+        sync_ulysses,
         FSDP,
         FSDP_CPU_OFFLOAD,
-        XFuser_attention
+        XFuser_attention,
     ):
         # THIS IS PYTORCH DIST ADDRESS
         # (TODO) Change so it can be use in cluster of nodes. but it is long waaaaay down in the priority list
         # os.environ['TORCH_CUDA_ARCH_LIST'] = ""
-        os.environ["MASTER_ADDR"] = "127.0.0.1"
-        os.environ["MASTER_PORT"] = "29500"
+        if "MASTER_ADDR" not in os.environ or "MASTER_PORT" not in os.environ:
+            os.environ.setdefault("MASTER_ADDR", "127.0.0.1")
+            os.environ.setdefault("MASTER_PORT", "29500")
+            print("No env for torch dist MASTER_ADDR and MASTER_PORT, defaulting to 127.0.0.1:29500")
+
         # HF Tokenizer warning when forking
         os.environ["TOKENIZERS_PARALLELISM"] = "false"
         self.parallel_dict = dict()
 
-        # Currenty not implementing CFG parallel, since LoRa can enable non cfg run
         world_size = GPU
         #max_world_size = torch.xpu.device_count()
         #if world_size > max_world_size:
         #    raise ValueError("To many gpus")
         if world_size == 0:
             raise ValueError("Num of cuda/cudalike device is 0")
-        if world_size < ulysses_degree * ring_degree:
+        if world_size < ulysses_degree * ring_degree * cfg_degree:
+            raise ValueError(f"ERROR, num_gpus: {world_size}, is lower than {ulysses_degree=} mul {ring_degree=}")
+        if cfg_degree > 2:
             raise ValueError(
-                f"ERROR, num_gpus: {world_size}, is lower than {ulysses_degree=} mul {ring_degree=}"
-            )
-        if FSDP is True and (world_size == 1):
-            raise ValueError(
-                "ERROR, FSDP cannot be use in single cuda/cudalike device"
+                "CFG batch only can be divided into 2 degree of parallelism, since its dimension is only 2"
             )
 
         self.parallel_dict["is_xdit"] = False
         self.parallel_dict["is_fsdp"] = False
-        self.parallel_dict["is_dumb_parallel"] = True
+        self.parallel_dict["sync_ulysses"] = False
+        self.parallel_dict["global_world_size"] = world_size
 
-        if ulysses_degree > 1 or ring_degree > 1:
+        if (
+            ulysses_degree > 1
+            or ring_degree > 1
+            or cfg_degree > 1
+        ):
             self.parallel_dict["attention"] = XFuser_attention
             self.parallel_dict["is_xdit"] = True
             self.parallel_dict["ulysses_degree"] = ulysses_degree
             self.parallel_dict["ring_degree"] = ring_degree
+            self.parallel_dict["cfg_degree"] = cfg_degree
+            self.parallel_dict["sync_ulysses"] = sync_ulysses
 
         if FSDP:
             self.parallel_dict["fsdp_cpu_offload"] = FSDP_CPU_OFFLOAD
@@ -104,11 +119,17 @@ class RayInitializer:
             ray.init(
                 ray_cluster_address,
                 namespace=ray_cluster_namespace,
-                runtime_env={"py_modules": [raylight]},
+                runtime_env={
+                    "py_modules": [raylight],
+                },
             )
         except Exception as e:
             ray.shutdown()
-            ray.init(runtime_env={"py_modules": [raylight]})
+            ray.init(
+                runtime_env={
+                    "py_modules": [raylight],
+                }
+            )
             raise RuntimeError(f"Ray connection failed: {e}")
 
         ray_nccl_tester(world_size)
@@ -122,9 +143,17 @@ class RayUNETLoader:
     def INPUT_TYPES(s):
         return {
             "required": {
-                "unet_name": (folder_paths.get_filename_list("diffusion_models"),),
+                "unet_name": (folder_paths.get_filename_list("diffusion_models")
+                              + folder_paths.get_filename_list("checkpoints"),),
                 "weight_dtype": (
-                    ["default", "fp8_e4m3fn", "fp8_e4m3fn_fast", "fp8_e5m2", "bf16", "fp16"],
+                    [
+                        "default",
+                        "fp8_e4m3fn",
+                        "fp8_e4m3fn_fast",
+                        "fp8_e5m2",
+                        "bf16",
+                        "fp16",
+                    ],
                 ),
                 "ray_actors_init": (
                     "RAY_ACTORS_INIT",
@@ -152,40 +181,17 @@ class RayUNETLoader:
         elif weight_dtype == "fp8_e5m2":
             model_options["dtype"] = torch.float8_e5m2
 
-        #  Collect compute capabilities from Ray workers
-        cc_futures = []
-        for actor in gpu_actors:
-            cc_futures.append(
-                actor.get_compute_capability.remote()
-            )
+        try:
+            unet_path = folder_paths.get_full_path_or_raise("diffusion_models", unet_name)
+        except:
+            unet_path = folder_paths.get_full_path_or_raise("checkpoints", unet_name)
 
-        compute_capabilities = [ray.get(cc) for cc in cc_futures]
-        unique_cc = set(compute_capabilities)
-
-        if len(unique_cc) > 1:
-            print(f"Multiple device architectures detected: {unique_cc}, choosing the oldest")
-            oldest = min(unique_cc)
-        else:
-            oldest = next(iter(unique_cc))
-
-        device_arch = oldest
-        # Check for flash_attn compatibility
-        if parallel_dict["is_xdit"] is True and device_arch <= 61:
-            raise ValueError(
-                f"Pascal detected (sm{device_arch}), cannot use USP"
-            )
-
-        unet_path = folder_paths.get_full_path_or_raise("diffusion_models", unet_name)
-
-        # Kill actor if model exist
 
         loaded_futures = []
         patched_futures = []
 
         for actor in gpu_actors:
-            loaded_futures.append(
-                actor.set_lora_list.remote(lora)
-            )
+            loaded_futures.append(actor.set_lora_list.remote(lora))
         ray.get(loaded_futures)
         loaded_futures = []
 
@@ -200,6 +206,12 @@ class RayUNETLoader:
 
             ray.get(loaded_futures)
             loaded_futures = []
+
+            for actor in gpu_actors:
+                loaded_futures.append(actor.set_state_dict.remote())
+
+            ray.get(loaded_futures)
+            loaded_futures = []
         else:
             for actor in gpu_actors:
                 loaded_futures.append(
@@ -210,7 +222,10 @@ class RayUNETLoader:
 
         for actor in gpu_actors:
             if parallel_dict["is_xdit"]:
-                patched_futures.append(actor.patch_usp.remote())
+                if (parallel_dict["ulysses_degree"]) > 1 or (parallel_dict["ring_degree"] > 1):
+                    patched_futures.append(actor.patch_usp.remote())
+                if parallel_dict["cfg_degree"] > 1:
+                    patched_futures.append(actor.patch_cfg.remote())
 
         ray.get(patched_futures)
 
@@ -237,9 +252,7 @@ class RayLoraLoader:
                     },
                 ),
             },
-            "optional": {
-                "prev_ray_lora": ("RAY_LORA", {"default": None})
-            }
+            "optional": {"prev_ray_lora": ("RAY_LORA", {"default": None})},
         }
 
     RETURN_TYPES = ("RAY_LORA",)
@@ -309,12 +322,7 @@ class XFuserKSamplerAdvanced:
             }
         }
 
-    RETURN_TYPES = (
-        "LATENT",
-        "LATENT",
-        "LATENT",
-        "LATENT",
-    )
+    RETURN_TYPES = ("LATENT",)
     FUNCTION = "ray_sample"
 
     CATEGORY = "Raylight"
@@ -368,19 +376,249 @@ class XFuserKSamplerAdvanced:
         ]
 
         results = ray.get(futures)
-        return tuple(result[0] for result in results[0:4])
+        return (results[0][0],)
+
+
+class DPKSamplerAdvanced:
+    @classmethod
+    def INPUT_TYPES(s):
+        return {
+            "required": {
+                "add_noise": (["enable", "disable"],),
+                "steps": ("INT", {"default": 20, "min": 1, "max": 10000}),
+                "cfg": (
+                    "FLOAT",
+                    {
+                        "default": 8.0,
+                        "min": 0.0,
+                        "max": 100.0,
+                        "step": 0.1,
+                        "round": 0.01,
+                    },
+                ),
+                "sampler_name": (comfy.samplers.KSampler.SAMPLERS,),
+                "scheduler": (comfy.samplers.KSampler.SCHEDULERS,),
+                "ray_actors": (
+                    "RAY_ACTORS",
+                    {"tooltip": "Ray Actor to submit the model into"},
+                ),
+                "noise_list": ("NOISE",),
+                "positive": ("CONDITIONING",),
+                "negative": ("CONDITIONING",),
+                "latent_image": ("LATENT",),
+                "start_at_step": ("INT", {"default": 0, "min": 0, "max": 10000}),
+                "end_at_step": ("INT", {"default": 10000, "min": 0, "max": 10000}),
+                "return_with_leftover_noise": (["disable", "enable"],),
+            }
+        }
+
+    RETURN_TYPES = ("LATENT",)
+    OUTPUT_IS_LIST = (True,)
+    INPUT_IS_LIST = True
+    FUNCTION = "ray_sample"
+
+    CATEGORY = "Raylight"
+
+    def ray_sample(
+        self,
+        ray_actors,
+        add_noise,
+        noise_list,
+        steps,
+        cfg,
+        sampler_name,
+        scheduler,
+        positive,
+        negative,
+        latent_image,
+        start_at_step,
+        end_at_step,
+        return_with_leftover_noise,
+        denoise=1.0,
+    ):
+
+        ray_actors = ray_actors[0]
+        add_noise = add_noise[0]
+        steps = steps[0]
+        cfg = cfg[0]
+        sampler_name = sampler_name[0]
+        scheduler = scheduler[0]
+        positive = positive[0]
+        negative = negative[0]
+        start_at_step = start_at_step[0]
+        end_at_step = end_at_step[0]
+        return_with_leftover_noise = return_with_leftover_noise[0]
+
+        gpu_actors = ray_actors["workers"]
+        parallel_dict = ray.get(gpu_actors[0].get_parallel_dict.remote())
+        if parallel_dict["is_xdit"] is True:
+            raise ValueError(
+                """
+            Data Parallel KSampler only supports FSDP or standard Data Parallel (DP).
+            Please set both 'ulysses_degree' and 'ring_degree' to 0,
+            or use the XFuser KSampler instead. More info on Raylight mode https://github.com/komikndr/raylight
+            """
+            )
+
+        if len(latent_image) != len(gpu_actors):
+            latent_image = [latent_image[0]] * len(gpu_actors)
+
+        # Clean VRAM for preparation to load model
+        gc.collect()
+        comfy.model_management.unload_all_models()
+        comfy.model_management.soft_empty_cache()
+        force_full_denoise = True
+        if return_with_leftover_noise == "enable":
+            force_full_denoise = False
+        disable_noise = False
+        if add_noise == "disable":
+            disable_noise = True
+
+        futures = [
+            actor.common_ksampler.remote(
+                noise_list[i],
+                steps,
+                cfg,
+                sampler_name,
+                scheduler,
+                positive,
+                negative,
+                latent_image[i],
+                denoise=denoise,
+                disable_noise=disable_noise,
+                start_step=start_at_step,
+                last_step=end_at_step,
+                force_full_denoise=force_full_denoise,
+            )
+            for i, actor in enumerate(gpu_actors)
+        ]
+
+        results = ray.get(futures)
+        results = [result[0] for result in results]
+        return (results,)
+
+
+class Noise_RandomNoise:
+    def __init__(self, seed):
+        self.seed = seed
+
+    def generate_noise(self, input_latent):
+        latent_image = input_latent["samples"]
+        batch_inds = (
+            input_latent["batch_index"] if "batch_index" in input_latent else None
+        )
+        return comfy.sample.prepare_noise(latent_image, self.seed, batch_inds)
+
+
+class DPNoiseList:
+    @classmethod
+    def INPUT_TYPES(cls):
+        return {
+            "required": {
+                **{
+                    f"noise_seed_{i}": (
+                        "INT",
+                        {
+                            "default": 0,
+                            "min": 0,
+                            "max": 0xFFFFFFFFFFFFFFFF,
+                            "control_after_generate": True,
+                        },
+                    )
+                    for i in range(8)
+                }
+            }
+        }
+
+    RETURN_TYPES = ("NOISE",)
+    OUTPUT_IS_LIST = (True,)
+    FUNCTION = "get_noise"
+    CATEGORY = "Raylight"
+
+    def get_noise(self, **kwargs):
+        noise_list = []
+        for key, seed in kwargs.items():
+            if key.startswith("noise_seed_"):
+                noise_list.append(seed)
+        return (noise_list,)
+
+
+class RayVAEDecodeDistributed:
+    @classmethod
+    def INPUT_TYPES(s):
+        return {
+            "required": {
+                "ray_actors": ("RAY_ACTORS", {"tooltip": "Ray Actor to submit the model into"}),
+                "samples": ("LATENT",),
+                "vae_name": (folder_paths.get_filename_list("vae"),),
+                "tile_size": ("INT", {"default": 512, "min": 64, "max": 4096, "step": 32},),
+                "overlap": ("INT", {"default": 64, "min": 0, "max": 4096, "step": 32}),
+                "temporal_size": (
+                    "INT",
+                    {
+                        "default": 64,
+                        "min": 8,
+                        "max": 4096,
+                        "step": 4,
+                        "tooltip": "Only used for video VAEs: Amount of frames to decode at a time.",
+                    },
+                ),
+                "temporal_overlap": (
+                    "INT",
+                    {
+                        "default": 8,
+                        "min": 4,
+                        "max": 4096,
+                        "step": 4,
+                        "tooltip": "Only used for video VAEs: Amount of frames to overlap.",
+                    },
+                ),
+            }
+        }
+
+    RETURN_TYPES = ("IMAGE",)
+    FUNCTION = "ray_decode"
+
+    CATEGORY = "Raylight"
+
+    def ray_decode(self, ray_actors, vae_name, samples, tile_size, overlap=64, temporal_size=64, temporal_overlap=8):
+        gpu_actors = ray_actors["workers"]
+        vae_path = folder_paths.get_full_path_or_raise("vae", vae_name)
+
+        for actor in gpu_actors:
+            ray.get(actor.ray_vae_loader.remote(vae_path))
+
+        futures = [
+            actor.ray_vae_decode.remote(
+                samples,
+                tile_size,
+                overlap=64,
+                temporal_size=64,
+                temporal_overlap=8
+            )
+            for i, actor in enumerate(gpu_actors)
+        ]
+
+        image = ray.get(futures)
+        return (image[0],)
 
 
 NODE_CLASS_MAPPINGS = {
     "XFuserKSamplerAdvanced": XFuserKSamplerAdvanced,
+    "DPKSamplerAdvanced": DPKSamplerAdvanced,
     "RayUNETLoader": RayUNETLoader,
     "RayLoraLoader": RayLoraLoader,
     "RayInitializer": RayInitializer,
+    "DPNoiseList": DPNoiseList,
+    "RayVAEDecodeDistributed": RayVAEDecodeDistributed
 }
 
 NODE_DISPLAY_NAME_MAPPINGS = {
-    "XFuserAttentionPatch": "XFuser Attention Patch",
+    "XFuserKSamplerAdvanced": "XFuser KSampler (Advanced)",
+    "DPKSamplerAdvanced": "Data Parallel KSampler (Advanced)",
     "RayUNETLoader": "Load Diffusion Model (Ray)",
     "RayLoraLoader": "Load Lora Model (Ray)",
     "RayInitializer": "Ray Init Actor",
+    "DPNoiseList": "Data Parallel Noise List",
+    "RayVAEDecodeDistributed": "Distributed VAE (Ray)"
 }
